@@ -1,3 +1,7 @@
 virtualenv -p python3.6 .
 source bin/activate
 pip install django
+pip install django-rq
+django-admin.py startproject sentence_database .
+./manage.py makemigrations
+./manage.py migrate

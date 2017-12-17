@@ -4,3 +4,8 @@
 /lib64/
 /local/
 /pip-selfcheck.json
+/pickles/*
+/data/*
+/sdb/migrations/*
+/db.sqlite3
+*.pyc
