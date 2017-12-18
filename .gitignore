@@ -9,3 +9,4 @@
 /sdb/migrations/*
 /db.sqlite3
 *.pyc
+sentence_database/settings_local.py
