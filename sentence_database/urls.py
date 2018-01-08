@@ -16,13 +16,13 @@ Including another URLconf
 from django.conf.urls import url
 from django.contrib import admin
 from django.urls import path
-from sdb import views
+import sdb.views
 
 urlpatterns = [
     path('admin/', admin.site.urls),
-    url(r'^$', views.index, name='index'),
-    url(r'^addsearch/$', views.addsearch, name='addsearch'),
-    url(r'^addexclusion/$', views.addexclusion, name='addexclusion'),
-    url(r'^delete/$', views.delete, name='delete'),
-    url(r'^getsearch/(?P<sid>[0-9]+)', views.getsearch, name='getsearch'),
+    url(r'^$', sdb.views.index, name='index'),
+    url(r'^addsearch/$', sdb.views.addsearch, name='addsearch'),
+    url(r'^addexclusion/$', sdb.views.addexclusion, name='addexclusion'),
+    url(r'^delete/$', sdb.views.delete, name='delete'),
+    url(r'^getsearch/(?P<sid>[0-9]+)', sdb.views.getsearch, name='getsearch'),
 ]

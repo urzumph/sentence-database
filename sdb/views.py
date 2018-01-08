@@ -2,6 +2,7 @@
 from __future__ import unicode_literals
 
 from django.shortcuts import render
+from django.contrib.auth.decorators import login_required
 
 # Create your views here.
 from django.http import HttpResponse
@@ -19,8 +20,6 @@ import django_rq
 #def index(request):
     #return HttpResponse("Hello, world. You're at the sdb index.")
     
-basedir = '/home/christian/Code/sdb2'
-
 def inner(request, cxt):
     if cxt == None:
         cxt = {}
@@ -33,11 +32,12 @@ def inner(request, cxt):
     return HttpResponse(template.render(cxt, request))
     #return HttpResponse(template.render(RequestContext(request, cxt)))
 
+#@login_required
 def index(request):
     #print "index()"
     return inner(request, None)
     
-
+#@login_required
 def addsearch(request):
     newkw = request.POST.get('newkw')
     
@@ -57,6 +57,7 @@ def addsearch(request):
     
     return inner(request, {'message': "Added kw %s with id %d" % (newkw, query.id)})
 
+#@login_required
 def delete(request):
     sid = request.POST.get('sid')
     query = Searches(id = sid)
@@ -71,6 +72,7 @@ def delete(request):
     
     return inner(request, cxt)
 
+#@login_required
 def getsearch(request, sid):
     cxt = {}
     cxt['getsearch'] = 1
@@ -88,6 +90,7 @@ def getsearch(request, sid):
     
     return inner(request, cxt)
 
+#@login_required
 def addexclusion(request):
     newexcl = request.POST.get('newexcl')
     sid = int(request.POST.get('sid'))

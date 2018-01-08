@@ -8,3 +8,4 @@ RQ_QUEUES = {
         'DEFAULT_TIMEOUT': 1800,
     }
 }
+ALLOWED_HOSTS = ['sdbdev.christian.id.au']

@@ -5,3 +5,8 @@ pip install django-rq
 django-admin.py startproject sentence_database .
 ./manage.py makemigrations
 ./manage.py migrate
+
+Install Apache, mod SSL, 
+SSL with let's encrypt - manuale works well on aws
+
+User Auth - include example config
