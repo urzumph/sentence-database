@@ -8,6 +8,7 @@ from django.contrib.auth.decorators import login_required
 from django.http import HttpResponse
 from django.template import loader
 from django.template import Template, RequestContext
+from django.conf import settings
 from .models import Searches
 from sent.search import search
 from sent import do_add_file
@@ -16,10 +17,8 @@ import sys
 import os
 import django_rq
 
-# Create your views here.
-#def index(request):
-    #return HttpResponse("Hello, world. You're at the sdb index.")
-    
+basedir = settings.BASE_DIR
+ 
 def inner(request, cxt):
     if cxt == None:
         cxt = {}

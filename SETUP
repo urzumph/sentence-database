@@ -9,4 +9,6 @@ django-admin.py startproject sentence_database .
 Install Apache, mod SSL, 
 SSL with let's encrypt - manuale works well on aws
 
+Install Redis with script from https://gist.github.com/dstroot/2776679
+
 User Auth - include example config
