@@ -1,10 +1,13 @@
-virtualenv -p python3.6 .
-source bin/activate
-pip install django
-pip install django-rq
-django-admin.py startproject sentence_database .
-./manage.py makemigrations
-./manage.py migrate
+Install from Github:
+# do git clone
+# virtualenv -p python3.6 .
+# source bin/activate
+# pip install django
+# pip install django-rq
+-- not required... django-admin.py startproject sentence_database .
+# Configure local settings file
+#./manage.py makemigrations
+#./manage.py migrate
 
 Install Apache, mod SSL, 
 SSL with let's encrypt - manuale works well on aws
