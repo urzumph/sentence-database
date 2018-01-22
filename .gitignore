@@ -1,0 +1,12 @@
+/bin/
+/include/
+/lib/
+/lib64/
+/local/
+/pip-selfcheck.json
+/pickles/*
+/data/*
+/sdb/migrations/*
+/db.sqlite3
+*.pyc
+sentence_database/settings_local.py

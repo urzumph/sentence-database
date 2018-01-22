@@ -1,0 +1,111 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN" "http://www.w3.org/TR/html4/loose.dtd">  
+<html lang="ja">  
+<head>  
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">  
+<title>SentenceDB</title>  
+<style>
+/*-------------------------フォントスタイル フォントサイズの指定*/   
+body {  
+    font-family: "ヒラギノ角ゴ Pro W3", "Hiragino Kaku Gothic Pro", "ＭＳ Ｐゴシック", "MS PGothic", sans-serif;  
+    font-size: 200%;  
+    text-align: center;  
+    margin: 0;  
+    padding: 0;  
+}  
+    
+/*-------------------------wrapperの指定*/   
+#wrapper {  
+    text-align: left;  
+    width: 100%;  
+    margin: 0 auto;  
+    padding: 0;  
+}  
+    
+/*-------------------------headerの指定*/   
+#header {  
+    height: 80px;  
+    margin: 0;  
+    padding-left: 30px;
+    padding-top: 30px;
+    background: blue
+}  
+#left {
+    width: 15%;
+    height: 100%;
+    /*position: fixed;*/
+    float: left; 
+    outline: 1px solid;
+    background: green;
+    padding: 30px;
+}
+/*-------------------------contentsの指定*/  
+#contents {  
+    width: 75%;  
+    float: right;  
+    margin: 0;  
+    padding-left: 30px;  
+}
+#txtbox {
+    font-size:18pt;
+    height:50px;
+    width:400px;
+}
+#txtbtn {
+    font-size:18pt;
+    height:40px;
+    width:300px;
+}
+
+</style>
+</head>  
+<body>  
+<div id="wrapper">  
+<!--header部分-->  
+<div id="header">  
+<form action="{% url 'addsearch' %}" method="post">
+{% csrf_token %}
+<input type="text" name="newkw" id="txtbox"/>
+<input type="submit" id="txtbtn" value="Add Keyword Search" />
+ Currently Pending SDB Searches: {{ numsearches }}
+</form>
+</div>  
+<!--header部分終わり-->  
+<div id="left">  
+{% if searches %}
+{% for search in searches %}
+        <li><a href="{% url 'getsearch' search.id %}/">{{ search.keyword }}</a></li>
+{% endfor %}
+{% endif %}
+</div>
+<!--contents部分-->  
+<div id="contents">  
+<p> 
+{{ message }}
+</p>
+
+{% if getsearch %}
+
+Exclusions: {% for e in exclusions %} {{ e }}, {% endfor %}<br /><br />
+
+<form action="{% url 'delete' %}" method="post">
+{% csrf_token %}
+<input type="hidden" name="sid" value="{{ sid }}" />
+<input type="submit" value="Delete this Search" />
+</form><br />
+
+{% for result in results %}
+        <p>{{ result.sentence }} : {{ result.score }}</p><br />
+{% endfor %}
+
+<form action="{% url 'addexclusion' %}" method="post">
+{% csrf_token %}
+<input type="hidden" name="sid" value="{{ sid }}" />
+<input type="text" name="newexcl" id="txtbox"/>
+<input type="submit" id="exclbtn" value="Add Exclusion" />
+</form>
+
+{% endif %}
+</div>  
+<!--contents部分終わり-->  
+ 
+</body>  
