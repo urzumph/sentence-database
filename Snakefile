@@ -59,7 +59,7 @@ rule wikipedia_nomarkup:
     # Wiki-markup [[Page|Displayed Text]] links
     complexlinks = re.compile(r'\[\[[^\[\]\|]+\|([^\[\]\|]+)\]\]')
     # IPA phonetics
-    phonetic = re.compile(r'{{IPA')
+    phonetic = re.compile(r'{{IPA', flags=re.IGNORECASE)
     # Correct / non-broken ref tag pairs
     ref = re.compile(r'<ref[^<]*</ref>')
     # Self-closing ref tag
@@ -69,7 +69,21 @@ rule wikipedia_nomarkup:
     # ref tag with no start
     reflonelyclose = re.compile(r'</ref>')
     # Temporary links to another language
-    tlink = re.compile(r'{{仮リンク|([^\|]+)|[^\|]*|[^}]*}}')
+    tlink = re.compile(r'{{仮リンク\|([^\|]+)\|[^\|]*\|[^}]*}}')
+    # Image link
+    ilink = re.compile(r'\[\[(ファイル|File):[^\]]*\]\]')
+    # nbsp
+    nbsp = re.compile(r'&nbsp;')
+    # html comments
+    htmlc = re.compile(r'<!--.*?-->')
+    # citations
+    cite = re.compile(r'{{Cite[^}]*}}', flags=re.IGNORECASE)
+    # English language links
+    ell = re.compile(r'{{lang\|en\|([^}]+)}}', flags=re.IGNORECASE)
+    sell = re.compile(r'{{Lang-en\|([^}]+)}}', flags=re.IGNORECASE)
+    # Non-english language links
+    snell = re.compile(r'{{lang-[a-zA-Z]+\|', flags=re.IGNORECASE)
+    nell = re.compile(r'{{lang\|[a-zA-Z]+\|([^}]+)}}', flags=re.IGNORECASE)
     with bz2.open(output[0], mode="wt") as of:
       for infn in input:
         with bz2.open(infn, mode="rt") as inf:
@@ -90,6 +104,12 @@ rule wikipedia_nomarkup:
               # Strip out sentences with IPA - I can't read the damn things
               if phonetic.search(sent):
                 continue
+              # Replace en lang links
+              usent = ell.sub(r'\1', usent)
+              usent = sell.sub(r'\1', usent)
+              # Delete sentences still containing lang links since they're non-english
+              if snell.search(usent) or nell.search(usent):
+                continue
               # left-strip markers for lists, table formatting, indentation, etc
               usent = sent.lstrip('#*:|-! ')
               usent = headre.sub(r'\1', usent)
@@ -98,6 +118,10 @@ rule wikipedia_nomarkup:
               usent = complexlinks.sub(r'\1', usent)
               usent = simplelinks.sub(r'\1', usent)
               usent = tlink.sub(r'\1', usent)
+              usent = ilink.sub('', usent)
+              usent = nbsp.sub(' ', usent)
+              usent = htmlc.sub('', usent)
+              usent = cite.sub('', usent)
               usent = ref.sub('', usent)
               usent = refshort.sub('', usent)
               usent = refend.sub('', usent)
@@ -106,8 +130,8 @@ rule wikipedia_nomarkup:
               # re-check length, it may be shorter now after regex changes
               if len(usent) > 5 and sanitycheck.search(usent):
                 of.write("{}{}{}\n".format(usent, sep, link))
-              if sentcount % 10000 == 0:
-                print("{} sentences processed")
+              if sentcount % 100000 == 0:
+                print("{} sentences processed".format(sentcount))
 
 
 rule wikipedia_noxml:
@@ -153,7 +177,7 @@ rule wikipedia_noxml:
                   # is simple and hopefully this should reduce the size
                   # of the text to store on disk. 
                   continue
-                of.write("{}{}https://ja.wikipedia.org/wiki/{}\n".format(stripped, sep, title))
+                of.write("{}{}[[{}]]\n".format(stripped, sep, title))
             elem.clear()
 
 rule tatoeba_idreplace:
