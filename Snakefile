@@ -2,6 +2,7 @@ import os
 import bz2
 import xml.etree.ElementTree
 import re
+import pickle
 
 def ls(dirpath, format):
   toret = []
@@ -16,12 +17,36 @@ global_limit = 0
 rule all:
   # N.B. - needs to be replaced with an indexing / scoring function
   input:
+    "processed_data/frequency_analysis/charfreq.pkl",
     "processed_data/output/wikipedia.txt.bz2",
     "processed_data/output/tatoeba.txt.bz2"
   output:
     "data/sdb.txt.bz2"
-  shell:
-    "bzcat {input} | bzip2 > {output}"
+  run:
+    limit = global_limit
+    sentcount = 0
+    with bz2.open(output[0], mode="wt") as of:
+      pfh = open(input[0], mode="rb")
+      freq = pickle.load(pfh)
+      for infn in input[1:]:
+        with bz2.open(infn, mode="rt") as inf:
+          for line in inf:
+            sentcount += 1
+            fc = 0
+            line = line.rstrip()
+            split = line.split(sep)
+            text = split[0]
+            note = split[1]
+            for c in text:
+              try:
+                #print(c, freq[c])
+                fc += freq[c][1]
+              except KeyError:
+                #print(c, "Not in freq file")
+                of.write("{} is not in freq file".format(c))
+            of.write("{}{}{}{}{}\n".format(text, sep, note, sep, fc))
+            if limit != 0 and sentcount > limit:
+              break
 
 rule wikipedia_finish:
   # N.b. Dodgy hack till I figure out the required steps
@@ -152,6 +177,7 @@ rule wikipedia_noxml:
           # Need to use the iterative mode of etree
           # The XML is so big it will exhaust all available
           # memory unless your PC is huge
+          titleskip = False
           for event, elem in xml.etree.ElementTree.iterparse(inf):
             limit -= 1
             if limit <= 0 and global_limit != 0:
@@ -159,11 +185,15 @@ rule wikipedia_noxml:
             # Grab the text out of the title, and add it in a wikipedia link
             # for "context" of the sentence
             if elem.tag.endswith("}title"):
+              titleskip = False
               title = elem.text
               titlecount += 1
               if titlecount % 10000 == 0:
                 print("{} titles complete".format(titlecount))
-            if elem.tag.endswith("}text") and elem.text is not None:
+              # Skip articles which contain rote phrases
+              if title.startswith("Wikipedia:アップロードログ"):
+                titleskip = True
+            if not titleskip and elem.tag.endswith("}text") and elem.text is not None:
               lines = elem.text.split("\n")
               for line in lines:
                 # We need to ensure that the original text does not contain
@@ -324,3 +354,35 @@ rule tatoeba_extract_links:
     "processed_data/tatoeba_extract/links.csv.bz2"
   shell:
     "tar -xOjf {input} links.csv | bzip2 > {output}"
+
+rule frequency_pickle:
+  input:
+    "raw_data/frequency_analysis/charfreq.txt"
+  output:
+    "processed_data/frequency_analysis/charfreq.pkl"
+  run:
+    with open(output[0], mode="wb") as of:
+      with open(input[0], mode="rt") as inf:
+        freq = dict()
+        count = 1
+        line = inf.readline()
+        # First line is ignored
+        while line or exception:
+          count += 1
+          exception = False
+          try:
+            line = inf.readline()
+          except UnicodeDecodeError:
+            print("Unicode Decode Error on line {}".format(count))
+            exception = True
+          if exception:
+            continue
+          line = line.rstrip()
+          if len(line) == 0:
+            continue
+          splitline = line.split("\t")
+          ctype = splitline[0]
+          char = splitline[1]
+          freqcount = int(splitline[2])
+          freq[char] = [ctype, freqcount]
+        pickle.dump(freq, of)
