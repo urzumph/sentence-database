@@ -3,10 +3,11 @@ import bz2
 import xml.etree.ElementTree
 import re
 
-def ls(dirpath):
+def ls(dirpath, format):
   toret = []
   for f in os.listdir(path=dirpath):
-    toret.append(os.path.join(dirpath, f))
+    if f.endswith(format):
+      toret.append(os.path.join(dirpath, f))
   return toret
 
 sep = "\t"
@@ -137,7 +138,7 @@ rule wikipedia_nomarkup:
 
 rule wikipedia_noxml:
   input:
-    ls("raw_data/wikipedia/")
+    ls("raw_data/wikipedia/", "bz2")
   output:
     "processed_data/wikipedia_noxml/wikipedia.txt.bz2"
   run:
