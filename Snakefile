@@ -104,6 +104,7 @@ rule wikipedia_nomarkup:
               # Strip out sentences with IPA - I can't read the damn things
               if phonetic.search(sent):
                 continue
+              usent = sent
               # Replace en lang links
               usent = ell.sub(r'\1', usent)
               usent = sell.sub(r'\1', usent)
@@ -111,7 +112,7 @@ rule wikipedia_nomarkup:
               if snell.search(usent) or nell.search(usent):
                 continue
               # left-strip markers for lists, table formatting, indentation, etc
-              usent = sent.lstrip('#*:|-! ')
+              usent = usent.lstrip('#*:|-! ')
               usent = headre.sub(r'\1', usent)
               usent = boldital.sub(r'\1', usent)
               usent = tags.sub("", usent)
@@ -192,36 +193,53 @@ rule tatoeba_idreplace:
     limit = global_limit
     with bz2.open(output[0], mode="wt") as of:
       with bz2.open(input[1], mode="rt") as senf:
+        senhash = dict()
+        interestingids = set()
+        engidhash = dict()
+        print("Generating input dictionary")
         with bz2.open(input[0], mode="rt") as inf:
           for line in inf:
             limit -= 1
             if limit <= 0 and global_limit != 0:
               return
-            senf.seek(0)
-            splited = line.split(sep)
-            ids = splited[1].split(' ')
-            idindex = 0
-            written = False
-            # Look through sentences trying to find one with the correct id
-            # to replace the id list. The links list will include ids that
-            # don't occur in the sentences list, because they are not jpn/eng
-            # and were removed previously.
-            for senl in senf:
-                sensplit = senl.split("\t")
-                while sensplit[0] > ids[idindex]:
-                  idindex += 1
-                  if idindex >= len(ids):
-                    break
-                if idindex >= len(ids):
-                  break
-                if sensplit[0] == ids[idindex] and sensplit[1] == "eng":
-                  # print <text> \t <linked eng sentence text>
-                  of.write("{}{}{}".format(splited[0], sep, sensplit[2]))
-                  written = True
-                  break
-            
-            if not written:
-              of.write("{}{}{}".format(splited[0], sep, "(No English Translation)"))
+            stripped = line.strip()
+            splited = stripped.split(sep)
+            sent = splited[0]
+            if len(splited) == 1:
+              idt = []
+            else:
+              idt = splited[1].split(' ')
+            ids = []
+            #print(splited, ids)
+            for it in idt:
+              text = it.strip()
+              if len(text) > 0:
+                intid = int(text)
+                engidhash[intid] = sent
+                interestingids.add(int(text))
+            senhash[sent] = None
+
+        # fkidhash should now be <translation id> => sentence
+        # here, we transform it to sentence => translation
+        print("Replacing ids in memory")
+        for senl in senf:
+          senstrip = senl.strip()
+          sensplit = senstrip.split("\t")
+          senid = int(sensplit[0])
+          if senid not in interestingids:
+            continue
+          if sensplit[1] != "eng":
+            continue
+          engsent = sensplit[2]
+          senhash[engidhash[senid]] = engsent
+
+        # lastly, do the actual writing
+        print("Writing output to file")
+        for k, v in senhash.items():
+          if type(v) is not str:
+            of.write("{}{}{}\n".format(k, sep, "(No English Translation)"))
+          else:
+            of.write("{}{}{}\n".format(k, sep, v))
 
 rule tatoeba_tolink:
   # tatoeba-from is <text> \t <sentence id>
@@ -236,11 +254,11 @@ rule tatoeba_tolink:
   run:
     with bz2.open(output[0], mode="wt") as of:
       links = dict()
-      with open(input[0], mode="rt") as inf:
+      with bz2.open(input[0], mode="rt") as inf:
         # First loop: collect all required ids in dict
         for line in inf:
           splited = line.split(sep)
-          targetid = splited[1]
+          targetid = splited[1].strip()
           links[targetid] = []
           
       # For each link, add it to appropriate array of links
@@ -249,15 +267,17 @@ rule tatoeba_tolink:
           linksplit = linkl.split("\t")
           # links is <id> \t <other sentence id>
           if linksplit[0] in links:
-            links[linksplit[0]].append(linksplit[1])
+            targetid = linksplit[1].strip()
+            links[linksplit[0]].append(targetid)
 
       # Now, go back to the start of the input sentences
-      inf.seek(0)
-      # And for each input sentences, re-print with the
-      # id list we collected from the links file
-      for line in inf:
-        splited = line.split(sep)
-        of.write("{}{}{}\n".format(splited[0], sep, ' '.join(links[splited[1]])))
+      with bz2.open(input[0], mode="rt") as inf:
+        # And for each input sentences, re-print with the
+        # id list we collected from the links file
+        for line in inf:
+          splited = line.split(sep)
+          targetid = splited[1].strip()
+          of.write("{}{}{}\n".format(splited[0], sep, ' '.join(links[targetid])))
 
 rule tatoeba_fromlink:
   input:
@@ -282,7 +302,8 @@ rule tatoeba_fromlink:
               # We need to output format:
               # <text> \t <sentence id>
               # Sentence id is meaningless now, but it will be transformed
-              of.write("{}{}{}\n".format(splited[2], sep, splited[0]))
+              text = splited[2].strip()
+              of.write("{}{}{}\n".format(text, sep, splited[0]))
 
 rule tatoeba_extract_sent:
   # Remove the tarfile wrapper that the tatoeba guys included
@@ -292,7 +313,7 @@ rule tatoeba_extract_sent:
   output:
     "processed_data/tatoeba_extract/sentences.csv.bz2"
   shell:
-    "tar -xOjf {input} `basename {output}` | egrep '(eng|jpn)' | bzip2 > {output}"
+    "tar -xOjf {input} sentences.csv | egrep '(eng|jpn)' | bzip2 > {output}"
 
 rule tatoeba_extract_links:
   # Remove the tarfile wrapper that the tatoeba guys included
@@ -301,4 +322,4 @@ rule tatoeba_extract_links:
   output:
     "processed_data/tatoeba_extract/links.csv.bz2"
   shell:
-    "tar -xOjf {input} `basename {output}` | bzip2 > {output}"
+    "tar -xOjf {input} links.csv | bzip2 > {output}"
