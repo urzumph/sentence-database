@@ -3,6 +3,7 @@ import bz2
 import xml.etree.ElementTree
 import re
 import pickle
+import unicodedata
 
 def ls(dirpath, format):
   toret = []
@@ -43,7 +44,7 @@ rule all:
                 fc += freq[c][1]
               except KeyError:
                 #print(c, "Not in freq file")
-                of.write("{} is not in freq file".format(c))
+                of.write("{} is not in freq file\n".format(c))
             of.write("{}{}{}{}{}\n".format(text, sep, note, sep, fc))
             if limit != 0 and sentcount > limit:
               break
@@ -367,6 +368,7 @@ rule frequency_pickle:
         count = 1
         line = inf.readline()
         # First line is ignored
+        # Read through input file
         while line or exception:
           count += 1
           exception = False
@@ -381,8 +383,19 @@ rule frequency_pickle:
           if len(line) == 0:
             continue
           splitline = line.split("\t")
+          # Input file contains character type, character itself, and frequency count
           ctype = splitline[0]
           char = splitline[1]
           freqcount = int(splitline[2])
+          # Create a lookup dictionary
           freq[char] = [ctype, freqcount]
+
+        # Add normalized versions for all characters in the dictionary
+        for k, v in freq.copy().items():
+          alternatekey = unicodedata.normalize('NFKC', k)
+          if alternatekey == k:
+            continue
+          if alternatekey in freq:
+            print("Warning: Multiple code points simplify to {}".format(k))
+          freq[alternatekey] = v
         pickle.dump(freq, of)
