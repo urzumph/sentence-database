@@ -4,6 +4,7 @@ import xml.etree.ElementTree
 import re
 import pickle
 import unicodedata
+import jaconv
 
 def ls(dirpath, format):
   toret = []
@@ -27,6 +28,7 @@ rule all:
     limit = global_limit
     sentcount = 0
     with bz2.open(output[0], mode="wt") as of:
+      missingchars = list()
       pfh = open(input[0], mode="rb")
       freq = pickle.load(pfh)
       for infn in input[1:]:
@@ -41,13 +43,15 @@ rule all:
             for c in text:
               try:
                 #print(c, freq[c])
-                fc += freq[c][1]
+                if freq[c][1] is not None:
+                  fc += freq[c][1]
               except KeyError:
                 #print(c, "Not in freq file")
-                of.write("{} is not in freq file\n".format(c))
+                missingchars.append(c)
             of.write("{}{}{}{}{}\n".format(text, sep, note, sep, fc))
             if limit != 0 and sentcount > limit:
               break
+          of.write("Missing Chars: {}".format(missingchars))
 
 rule wikipedia_finish:
   # N.b. Dodgy hack till I figure out the required steps
@@ -364,6 +368,7 @@ rule frequency_pickle:
   run:
     with open(output[0], mode="wb") as of:
       with open(input[0], mode="rt") as inf:
+        symbols = '：:；;() {}[]|/\\<>,.＆&"\'「」'
         freq = dict()
         count = 1
         line = inf.readline()
@@ -392,10 +397,36 @@ rule frequency_pickle:
 
         # Add normalized versions for all characters in the dictionary
         for k, v in freq.copy().items():
+          # unicodedata normalization
           alternatekey = unicodedata.normalize('NFKC', k)
-          if alternatekey == k:
-            continue
-          if alternatekey in freq:
-            print("Warning: Multiple code points simplify to {}".format(k))
-          freq[alternatekey] = v
+          if alternatekey != k:
+            print("(unicodedata) {} = {}".format(k, alternatekey))
+            if alternatekey in freq:
+              print("Warning: (unicodedata) Multiple code points simplify to {}".format(k))
+            else:
+              freq[alternatekey] = v
+
+          # full -> half width conversion
+          alternatekey = jaconv.z2h(k, kana=True, digit=True, ascii=True)
+          if alternatekey != k:
+            print("(jaconv) {} = {}".format(k, alternatekey))
+            if alternatekey in freq:
+              print("Warning: (jaconv) Multiple code points simplify to {}".format(k))
+            else:
+              freq[alternatekey] = v
+
+          # upper case
+          hkey = jaconv.z2h(k, kana=True, digit=True, ascii=True)
+          alternatekey = hkey.upper()
+          if alternatekey != hkey:
+            print("(upper) {} = {}".format(k, alternatekey))
+            if alternatekey in freq:
+              print("Warning: (upper) Multiple code points simplify to {}".format(k))
+            else:
+              freq[alternatekey] = v
+
+        for c in symbols:
+          if c not in freq:
+            freq[c] = ["Symbol", None]
+
         pickle.dump(freq, of)
