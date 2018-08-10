@@ -28,7 +28,7 @@ rule all:
     limit = global_limit
     sentcount = 0
     with bz2.open(output[0], mode="wt") as of:
-      missingchars = list()
+      missingchars = dict()
       pfh = open(input[0], mode="rb")
       freq = pickle.load(pfh)
       for infn in input[1:]:
@@ -47,11 +47,16 @@ rule all:
                   fc += freq[c][1]
               except KeyError:
                 #print(c, "Not in freq file")
-                missingchars.append(c)
+                if c not in missingchars:
+                  missingchars[c] = 1
+                else:
+                  missingchars[c] += 1
             of.write("{}{}{}{}{}\n".format(text, sep, note, sep, fc))
             if limit != 0 and sentcount > limit:
               break
-          of.write("Missing Chars: {}".format(missingchars))
+          for k, v in missingchars.items():
+            if v > 5:
+              of.write("Missing Char: {} : {}".format(k, v))
 
 rule wikipedia_finish:
   # N.b. Dodgy hack till I figure out the required steps
