@@ -5,6 +5,7 @@ import re
 import pickle
 import unicodedata
 import jaconv
+import multiprocessing
 
 def ls(dirpath, format):
   toret = []
@@ -16,14 +17,60 @@ def ls(dirpath, format):
 sep = "\t"
 global_limit = 0
 
+def bzinput_read(send_conn, fl, limit):
+  for infn in fl:
+    with bz2.open(infn, mode="rt") as inf:
+      for line in inf:
+        sentcount += 1
+        if limit != 0 and sentcount > limit:
+          break
+        sline = line.rstrip()
+        split = sline.split(sep)
+        text = split[0]
+        if len(split) > 1:
+          note = split[1]
+        else:
+          note = ''
+        if len(split) > 2:
+          score = int(split[2])
+        else:
+          score = 0
+        send_conn.send([text, note, score])
+  send_conn.close()
+
+def bzinput(fl, limit):
+  send_conn, recv_conn = Pipe()
+  p = Process(target=bzinput_read, args=(send_conn, fl, limit))
+  p.start()
+  print("Input Process id: {}".format(p.pid))
+  return p, recv_conn
+
+def bzoutput_write(recv_conn, fn, limit):
+  with bz2.open(fn, mode="wt") as of:
+    while True:
+      try:
+        read = recv_conn.recv()
+      except EOFError:
+        break
+      of.write("{}{}{}{}{}".format(read[0], sep, read[1], sep, read[2]))
+
+  recv_conn.close()
+
+def bzoutput(fn):
+  send_conn, recv_conn = Pipe()
+  p = Process(target=bzoutput_write, args=(recv_conn, fn))
+  p.start()
+  print("Output Process id: {}".format(p.pid))
+  return p, send_conn
+
 rule all:
   # N.B. - needs to be replaced with an indexing / scoring function
   input:
     "processed_data/frequency_analysis/charfreq.pkl",
-    "processed_data/output/wikipedia.txt.bz2",
-    "processed_data/output/tatoeba.txt.bz2"
+    "processed_data/filtered/stage1.txt.bz2"
   output:
-    "data/sdb.txt.bz2"
+    "data/sdb.txt.bz2",
+    "processed_data/frequency_analysis/missingchars.txt"
   run:
     limit = global_limit
     sentcount = 0
@@ -31,32 +78,112 @@ rule all:
       missingchars = dict()
       pfh = open(input[0], mode="rb")
       freq = pickle.load(pfh)
-      for infn in input[1:]:
-        with bz2.open(infn, mode="rt") as inf:
-          for line in inf:
-            sentcount += 1
-            fc = 0
-            line = line.rstrip()
-            split = line.split(sep)
-            text = split[0]
-            note = split[1]
-            for c in text:
-              try:
-                #print(c, freq[c])
-                if freq[c][1] is not None:
-                  fc += freq[c][1]
-              except KeyError:
-                #print(c, "Not in freq file")
-                if c not in missingchars:
-                  missingchars[c] = 1
-                else:
-                  missingchars[c] += 1
-            of.write("{}{}{}{}{}\n".format(text, sep, note, sep, fc))
-            if limit != 0 and sentcount > limit:
-              break
-          for k, v in missingchars.items():
-            if v > 5:
-              of.write("Missing Char: {} : {}".format(k, v))
+      with bz2.open(input[1], mode="rt") as inf:
+        for line in inf:
+          sentcount += 1
+          fc = 0
+          line = line.rstrip()
+          split = line.split(sep)
+          text = split[0]
+          note = split[1]
+          for c in text:
+            try:
+              #print(c, freq[c])
+              if freq[c][1] is not None:
+                fc += freq[c][1]
+            except KeyError:
+              #print(c, "Not in freq file")
+              if c not in missingchars:
+                missingchars[c] = [1, [line]]
+              else:
+                missingchars[c][0] += 1
+                missingchars[c][1].append(line)
+                if missingchars[c] == 5:
+                  cname = unicodedata.name(c, "NONAME")
+                  print("Missing Char: {} ({}) hit limit of 5".format(c, cname))
+          of.write("{}{}{}{}{}\n".format(text, sep, note, sep, fc))
+          if limit != 0 and sentcount > limit:
+            break
+
+    with open(output[1], mode="wt") as mcf:
+      for k, v in missingchars.items():
+        if v > 5:
+          mcf.write("Missing Char: {} ({}): {}\n".format(k, unicodedata.name(k, "NONAME"), v[0]))
+          for line in v[1]:
+            mcf.write("{}\n".format(line))
+
+rule filter:
+  input:
+    "processed_data/output/wikipedia.txt.bz2",
+    "processed_data/output/tatoeba.txt.bz2"
+  output:
+    "processed_data/filtered/stage1.txt.bz2"
+  run:
+    limit = global_limit
+    sentcount = 0
+    # Mostly math stuff that I understand well enough to know would not make useful sentences
+    excludedsymbols = list()
+    excludedsymbols.append("∃")
+    excludedsymbols.append("√")
+    excludedsymbols.append("∋")
+    excludedsymbols.append("∈")
+    excludedsymbols.append("⊂")
+    excludedsymbols.append("≧")
+    excludedsymbols.append("⋊")
+    ip, rc = bzinput(input, limit)
+    op, sc = bzoutput(output[0])
+    # Unicode data to exclude sentences containing languages I can't read
+    while True:
+      try:
+        text, note, score = rc.recv()
+      except EOFError:
+        break
+      skip = False
+      for c in text:
+        cname = unicodedata.name(c, "NONAME")
+        if cname.startswith("HANGUL"):
+          skip = True
+          break
+        if cname.startswith("TAMIL"):
+          skip = True
+          break
+        if cname.startswith("CYRILLIC"):
+          skip = True
+          break
+        if cname.startswith("MONGOLIAN"):
+          skip = True
+          break
+        if cname.startswith("THAI"):
+          skip = True
+          break
+        if cname.startswith("GUJARATI"):
+          skip = True
+          break
+        if cname.startswith("MYANMAR"):
+          skip = True
+          break
+        if cname.startswith("KANNADA"):
+          skip = True
+          break
+        if cname.startswith("ARMENIAN"):
+          skip = True
+          break
+        if cname.startswith("LAO "):
+          skip = True
+          break
+        if cname.startswith("TELUGU"):
+          skip = True
+          break
+        if c in excludedsymbols:
+          skip = True
+          break
+            
+        if not skip:
+          sc.send([text, note, score])
+
+      ip.join()
+      sc.close()
+      op.join()            
 
 rule wikipedia_finish:
   # N.b. Dodgy hack till I figure out the required steps
@@ -373,7 +500,7 @@ rule frequency_pickle:
   run:
     with open(output[0], mode="wb") as of:
       with open(input[0], mode="rt") as inf:
-        symbols = '：:；;() {}[]|/\\<>,.＆&"\'「」'
+        symbols = '：:；;()（） {}[]|/\\<>,、.。＆&"”\'’「」0123456789０１２３４５６７８９=-+*%$#@!＝ー＋＊％＄＃＠！⋆〒℃ ˝'
         freq = dict()
         count = 1
         line = inf.readline()
@@ -420,16 +547,25 @@ rule frequency_pickle:
             else:
               freq[alternatekey] = v
 
-          # upper case
+          # upper case half width
           hkey = jaconv.z2h(k, kana=True, digit=True, ascii=True)
           alternatekey = hkey.upper()
           if alternatekey != hkey:
-            print("(upper) {} = {}".format(k, alternatekey))
+            print("(hw upper) {} = {}".format(k, alternatekey))
             if alternatekey in freq:
               print("Warning: (upper) Multiple code points simplify to {}".format(k))
             else:
               freq[alternatekey] = v
 
+          # upper case full width
+          alternatekey = k.upper()
+          if alternatekey != k:
+            print("(fw upper) {} = {}".format(k, alternatekey))
+            if alternatekey in freq:
+              print("Warning: (upper) Multiple code points simplify to {}".format(k))
+            else:
+              freq[alternatekey] = v
+        
         for c in symbols:
           if c not in freq:
             freq[c] = ["Symbol", None]
