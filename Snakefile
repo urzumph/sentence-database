@@ -6,6 +6,7 @@ import pickle
 import unicodedata
 import jaconv
 import multiprocessing
+import gzip
 
 def ls(dirpath, format):
   toret = []
@@ -17,9 +18,10 @@ def ls(dirpath, format):
 sep = "\t"
 global_limit = 0
 
-def bzinput_read(send_conn, fl, limit):
+def gzinput_read(send_conn, fl, limit):
+  sentcount = 0
   for infn in fl:
-    with bz2.open(infn, mode="rt") as inf:
+    with gzip.open(infn, mode="rt") as inf:
       for line in inf:
         sentcount += 1
         if limit != 0 and sentcount > limit:
@@ -38,15 +40,15 @@ def bzinput_read(send_conn, fl, limit):
         send_conn.send([text, note, score])
   send_conn.close()
 
-def bzinput(fl, limit):
-  send_conn, recv_conn = Pipe()
-  p = Process(target=bzinput_read, args=(send_conn, fl, limit))
+def gzinput(fl, limit):
+  send_conn, recv_conn = multiprocessing.Pipe()
+  p = multiprocessing.Process(target=gzinput_read, args=(send_conn, fl, limit))
   p.start()
   print("Input Process id: {}".format(p.pid))
   return p, recv_conn
 
-def bzoutput_write(recv_conn, fn, limit):
-  with bz2.open(fn, mode="wt") as of:
+def gzoutput_write(recv_conn, fn):
+  with gzip.open(fn, mode="wt") as of:
     while True:
       try:
         read = recv_conn.recv()
@@ -56,9 +58,9 @@ def bzoutput_write(recv_conn, fn, limit):
 
   recv_conn.close()
 
-def bzoutput(fn):
-  send_conn, recv_conn = Pipe()
-  p = Process(target=bzoutput_write, args=(recv_conn, fn))
+def gzoutput(fn):
+  send_conn, recv_conn = multiprocessing.Pipe()
+  p = multiprocessing.Process(target=gzoutput_write, args=(recv_conn, fn))
   p.start()
   print("Output Process id: {}".format(p.pid))
   return p, send_conn
@@ -67,57 +69,59 @@ rule all:
   # N.B. - needs to be replaced with an indexing / scoring function
   input:
     "processed_data/frequency_analysis/charfreq.pkl",
-    "processed_data/filtered/stage1.txt.bz2"
+    "processed_data/filtered/stage1.txt.gz"
   output:
-    "data/sdb.txt.bz2",
+    "data/sdb.txt.gz",
     "processed_data/frequency_analysis/missingchars.txt"
+  log:
+    "makelog/missingchars.log"
   run:
     limit = global_limit
-    sentcount = 0
-    with bz2.open(output[0], mode="wt") as of:
-      missingchars = dict()
-      pfh = open(input[0], mode="rb")
-      freq = pickle.load(pfh)
-      with bz2.open(input[1], mode="rt") as inf:
-        for line in inf:
-          sentcount += 1
-          fc = 0
-          line = line.rstrip()
-          split = line.split(sep)
-          text = split[0]
-          note = split[1]
-          for c in text:
-            try:
-              #print(c, freq[c])
-              if freq[c][1] is not None:
-                fc += freq[c][1]
-            except KeyError:
-              #print(c, "Not in freq file")
-              if c not in missingchars:
-                missingchars[c] = [1, [line]]
-              else:
-                missingchars[c][0] += 1
-                missingchars[c][1].append(line)
-                if missingchars[c] == 5:
-                  cname = unicodedata.name(c, "NONAME")
-                  print("Missing Char: {} ({}) hit limit of 5".format(c, cname))
-          of.write("{}{}{}{}{}\n".format(text, sep, note, sep, fc))
-          if limit != 0 and sentcount > limit:
-            break
+    missingchars = dict()
+    pfh = open(input[0], mode="rb")
+    freq = pickle.load(pfh)
+    ip, rc = gzinput(input[1:], limit)
+    op, sc = gzoutput(output[0])
+    lh = open(log[0], mode="wt")
+    while True:
+      try:
+        text, note, fc = rc.recv()
+      except EOFError:
+        break
+      for c in text:
+        try:
+          #print(c, freq[c])
+          if freq[c][1] is not None:
+            fc += freq[c][1]
+        except KeyError:
+          #print(c, "Not in freq file")
+          if c not in missingchars:
+            missingchars[c] = [1, [[text, note]]]
+          else:
+            missingchars[c][0] += 1
+            missingchars[c][1].append([text, note])
+            if missingchars[c] == 5:
+              cname = unicodedata.name(c, "NONAME")
+              lh.write("Missing Char: {} ({}) hit limit of 5".format(c, cname))
+      
+        sc.send([text, note, fc])
 
+    ip.join()
+    sc.close()
+    op.join()            
     with open(output[1], mode="wt") as mcf:
       for k, v in missingchars.items():
         if v > 5:
           mcf.write("Missing Char: {} ({}): {}\n".format(k, unicodedata.name(k, "NONAME"), v[0]))
-          for line in v[1]:
-            mcf.write("{}\n".format(line))
+          for arr in v[1]:
+            mcf.write("{}{}{}\n".format(arr[0], sep, arr[1]))
 
 rule filter:
   input:
-    "processed_data/output/wikipedia.txt.bz2",
-    "processed_data/output/tatoeba.txt.bz2"
+    "processed_data/output/wikipedia.txt.gz",
+    "processed_data/output/tatoeba.txt.gz"
   output:
-    "processed_data/filtered/stage1.txt.bz2"
+    "processed_data/filtered/stage1.txt.gz"
   run:
     limit = global_limit
     sentcount = 0
@@ -130,8 +134,8 @@ rule filter:
     excludedsymbols.append("⊂")
     excludedsymbols.append("≧")
     excludedsymbols.append("⋊")
-    ip, rc = bzinput(input, limit)
-    op, sc = bzoutput(output[0])
+    ip, rc = gzinput(input, limit)
+    op, sc = gzoutput(output[0])
     # Unicode data to exclude sentences containing languages I can't read
     while True:
       try:
@@ -188,17 +192,17 @@ rule filter:
 rule wikipedia_finish:
   # N.b. Dodgy hack till I figure out the required steps
   input:
-    "processed_data/wikipedia_nomarkup/wikipedia.txt.bz2"
+    "processed_data/wikipedia_nomarkup/wikipedia.txt.gz"
   output:
-    "processed_data/output/wikipedia.txt.bz2"
+    "processed_data/output/wikipedia.txt.gz"
   shell:
     "cp {input} {output}"
 
 rule wikipedia_nomarkup:
   input:
-    "processed_data/wikipedia_noxml/wikipedia.txt.bz2"
+    "processed_data/wikipedia_noxml/wikipedia.txt.gz"
   output:
-    "processed_data/wikipedia_nomarkup/wikipedia.txt.bz2"
+    "processed_data/wikipedia_nomarkup/wikipedia.txt.gz"
   run:
     limit = global_limit
     sentcount = 0
@@ -244,12 +248,14 @@ rule wikipedia_nomarkup:
     # English language links
     ell = re.compile(r'{{lang\|en\|([^}]+)}}', flags=re.IGNORECASE)
     sell = re.compile(r'{{Lang-en\|([^}]+)}}', flags=re.IGNORECASE)
+    well = re.compile(r'{{LangWithName\|en\|([^}]+)}}', flags=re.IGNORECASE)
     # Non-english language links
     snell = re.compile(r'{{lang-[a-zA-Z]+\|', flags=re.IGNORECASE)
     nell = re.compile(r'{{lang\|[a-zA-Z]+\|([^}]+)}}', flags=re.IGNORECASE)
-    with bz2.open(output[0], mode="wt") as of:
+    wnell = re.compile(r'{{LangWithName\|[a-zA-Z]+\|([^}]+)}}', flags=re.IGNORECASE)
+    with gzip.open(output[0], mode="wt") as of:
       for infn in input:
-        with bz2.open(infn, mode="rt") as inf:
+        with gzip.open(infn, mode="rt") as inf:
           for line in inf:
             # This limit is so we can test with small amounts of input initially
             limit -= 1
@@ -271,8 +277,9 @@ rule wikipedia_nomarkup:
               # Replace en lang links
               usent = ell.sub(r'\1', usent)
               usent = sell.sub(r'\1', usent)
+              usent = well.sub(r'\1', usent)
               # Delete sentences still containing lang links since they're non-english
-              if snell.search(usent) or nell.search(usent):
+              if snell.search(usent) or nell.search(usent) or wnell.search(usent):
                 continue
               # left-strip markers for lists, table formatting, indentation, etc
               usent = usent.lstrip('#*:|-! ')
@@ -308,7 +315,7 @@ rule wikipedia_noxml:
     title = ""
     titlecount = 0
     sanitycheck = re.compile('[をがは]')
-    with bz2.open(output[0], mode="wt") as of:
+    with gzip.open(output[0], mode="wt") as of:
       for infn in input:
         with bz2.open(infn, mode="rt") as inf:
           # Need to use the iterative mode of etree
@@ -353,19 +360,19 @@ rule tatoeba_idreplace:
   # tatoeba-to is <text> \t <space separated list of ids>
   # sentences is <id> \t <lang> \t <text>
   input:
-    "processed_data/tatoeba_link/tatoeba-to.txt.bz2",
+    "processed_data/tatoeba_link/tatoeba-to.txt.gz",
     "processed_data/tatoeba_extract/sentences.csv.bz2"
   output:
-    "processed_data/output/tatoeba.txt.bz2"
+    "processed_data/output/tatoeba.txt.gz"
   run:
     limit = global_limit
-    with bz2.open(output[0], mode="wt") as of:
+    with gz.open(output[0], mode="wt") as of:
       with bz2.open(input[1], mode="rt") as senf:
         senhash = dict()
         interestingids = set()
         engidhash = dict()
         print("Generating input dictionary")
-        with bz2.open(input[0], mode="rt") as inf:
+        with gz.open(input[0], mode="rt") as inf:
           for line in inf:
             limit -= 1
             if limit <= 0 and global_limit != 0:
@@ -413,16 +420,16 @@ rule tatoeba_tolink:
   # tatoeba-from is <text> \t <sentence id>
   # links is <id> \t <other sentence id>
   input:
-    "processed_data/tatoeba_link/tatoeba-from.txt.bz2",
+    "processed_data/tatoeba_link/tatoeba-from.txt.gz",
     "processed_data/tatoeba_extract/links.csv.bz2"
   # output format should be:
   # <text> \t <space separated list of other sentence ids>
   output:
-    "processed_data/tatoeba_link/tatoeba-to.txt.bz2"
+    "processed_data/tatoeba_link/tatoeba-to.txt.gz"
   run:
-    with bz2.open(output[0], mode="wt") as of:
+    with gzip.open(output[0], mode="wt") as of:
       links = dict()
-      with bz2.open(input[0], mode="rt") as inf:
+      with gzip.open(input[0], mode="rt") as inf:
         # First loop: collect all required ids in dict
         for line in inf:
           splited = line.split(sep)
@@ -430,7 +437,7 @@ rule tatoeba_tolink:
           links[targetid] = []
           
       # For each link, add it to appropriate array of links
-      with bz2.open(input[1], mode="rt") as linkf:
+      with gzip.open(input[1], mode="rt") as linkf:
         for linkl in linkf:
           linksplit = linkl.split("\t")
           # links is <id> \t <other sentence id>
@@ -439,7 +446,7 @@ rule tatoeba_tolink:
             links[linksplit[0]].append(targetid)
 
       # Now, go back to the start of the input sentences
-      with bz2.open(input[0], mode="rt") as inf:
+      with gzip.open(input[0], mode="rt") as inf:
         # And for each input sentences, re-print with the
         # id list we collected from the links file
         for line in inf:
@@ -451,12 +458,12 @@ rule tatoeba_fromlink:
   input:
     "processed_data/tatoeba_extract/sentences.csv.bz2"
   output:
-    "processed_data/tatoeba_link/tatoeba-from.txt.bz2"
+    "processed_data/tatoeba_link/tatoeba-from.txt.gz"
   run:
     limit = global_limit
     with bz2.open(output[0], mode="wt") as of:
       for infn in input:
-        with bz2.open(infn, mode="rt") as inf:
+        with gzip.open(infn, mode="rt") as inf:
           for line in inf:
             limit -= 1
             if limit <= 0 and global_limit != 0:
