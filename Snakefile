@@ -253,108 +253,112 @@ rule wikipedia_nomarkup:
     snell = re.compile(r'{{lang-[a-zA-Z]+\|', flags=re.IGNORECASE)
     nell = re.compile(r'{{lang\|[a-zA-Z]+\|([^}]+)}}', flags=re.IGNORECASE)
     wnell = re.compile(r'{{LangWithName\|[a-zA-Z]+\|([^}]+)}}', flags=re.IGNORECASE)
-    with gzip.open(output[0], mode="wt") as of:
-      for infn in input:
-        with gzip.open(infn, mode="rt") as inf:
-          for line in inf:
-            # This limit is so we can test with small amounts of input initially
-            limit -= 1
-            if limit <= 0 and global_limit != 0:
-              return
-            # line should be <text block>\t<url>
-            parts = line.split(sep)
-            link = parts[1].rstrip()
-            # Split based on the defined sentence separators
-            # to turn <text block> into one or more sentences
-            strarr = sentsplit.split(parts[0])
+    # Input/output pipes
+    ip, rc = gzinput(input, limit)
+    op, sc = gzoutput(output[0])
+    while True:
+      try:
+        text, note, score = rc.recv()
+      except EOFError:
+        break
+      # line should be <text block>\t<url>
+      parts = line.split(sep)
+      link = note
+      # Split based on the defined sentence separators
+      # to turn <text block> into one or more sentences
+      strarr = sentsplit.split(text)
 
-            for sent in strarr:
-              sentcount += 1
-              # Strip out sentences with IPA - I can't read the damn things
-              if phonetic.search(sent):
-                continue
-              usent = sent
-              # Replace en lang links
-              usent = ell.sub(r'\1', usent)
-              usent = sell.sub(r'\1', usent)
-              usent = well.sub(r'\1', usent)
-              # Delete sentences still containing lang links since they're non-english
-              if snell.search(usent) or nell.search(usent) or wnell.search(usent):
-                continue
-              # left-strip markers for lists, table formatting, indentation, etc
-              usent = usent.lstrip('#*:|-! ')
-              usent = headre.sub(r'\1', usent)
-              usent = boldital.sub(r'\1', usent)
-              usent = tags.sub("", usent)
-              usent = complexlinks.sub(r'\1', usent)
-              usent = simplelinks.sub(r'\1', usent)
-              usent = tlink.sub(r'\1', usent)
-              usent = ilink.sub('', usent)
-              usent = nbsp.sub(' ', usent)
-              usent = htmlc.sub('', usent)
-              usent = cite.sub('', usent)
-              usent = ref.sub('', usent)
-              usent = refshort.sub('', usent)
-              usent = refend.sub('', usent)
-              usent = reflonelyclose.sub('', usent)
+      for sent in strarr:
+        sentcount += 1
+        # Strip out sentences with IPA - I can't read the damn things
+        if phonetic.search(sent):
+          continue
+        usent = sent
+        # Replace en lang links
+        usent = ell.sub(r'\1', usent)
+        usent = sell.sub(r'\1', usent)
+        usent = well.sub(r'\1', usent)
+        # Delete sentences still containing lang links since they're non-english
+        if snell.search(usent) or nell.search(usent) or wnell.search(usent):
+          continue
+        # left-strip markers for lists, table formatting, indentation, etc
+        usent = usent.lstrip('#*:|-! ')
+        usent = headre.sub(r'\1', usent)
+        usent = boldital.sub(r'\1', usent)
+        usent = tags.sub("", usent)
+        usent = complexlinks.sub(r'\1', usent)
+        usent = simplelinks.sub(r'\1', usent)
+        usent = tlink.sub(r'\1', usent)
+        usent = ilink.sub('', usent)
+        usent = nbsp.sub(' ', usent)
+        usent = htmlc.sub('', usent)
+        usent = cite.sub('', usent)
+        usent = ref.sub('', usent)
+        usent = refshort.sub('', usent)
+        usent = refend.sub('', usent)
+        usent = reflonelyclose.sub('', usent)
 
-              # re-check length, it may be shorter now after regex changes
-              if len(usent) > 5 and sanitycheck.search(usent):
-                of.write("{}{}{}\n".format(usent, sep, link))
-              if sentcount % 100000 == 0:
+        # re-check length, it may be shorter now after regex changes
+        if len(usent) > 5 and sanitycheck.search(usent):
+          sc.send([usent, link, score])
+          if sentcount % 100000 == 0:
                 print("{} sentences processed".format(sentcount))
-
+    sc.close()
+    ip.join()
+    op.join()
 
 rule wikipedia_noxml:
   input:
     ls("raw_data/wikipedia/", "bz2")
   output:
-    "processed_data/wikipedia_noxml/wikipedia.txt.bz2"
+    "processed_data/wikipedia_noxml/wikipedia.txt.gz"
   run:
     limit = global_limit
     title = ""
     titlecount = 0
     sanitycheck = re.compile('[をがは]')
-    with gzip.open(output[0], mode="wt") as of:
-      for infn in input:
-        with bz2.open(infn, mode="rt") as inf:
-          # Need to use the iterative mode of etree
-          # The XML is so big it will exhaust all available
-          # memory unless your PC is huge
-          titleskip = False
-          for event, elem in xml.etree.ElementTree.iterparse(inf):
-            limit -= 1
-            if limit <= 0 and global_limit != 0:
-              return
-            # Grab the text out of the title, and add it in a wikipedia link
-            # for "context" of the sentence
-            if elem.tag.endswith("}title"):
-              titleskip = False
-              title = elem.text
-              titlecount += 1
-              if titlecount % 10000 == 0:
-                print("{} titles complete".format(titlecount))
-              # Skip articles which contain rote phrases
-              if title.startswith("Wikipedia:アップロードログ"):
-                titleskip = True
-            if not titleskip and elem.tag.endswith("}text") and elem.text is not None:
-              lines = elem.text.split("\n")
-              for line in lines:
-                # We need to ensure that the original text does not contain
-                # any of the separator we plan to use for our text files
-                notabs = line.replace(sep, " ")
-                stripped = notabs.strip()
-                if len(stripped) < 5:
-                  # No way a valid sentence is < 5 chars
-                  continue
-                if not sanitycheck.search(stripped):
-                  # Analysis of the output text seemed to show a lot
-                  # which were failing the sanity check. The check
-                  # is simple and hopefully this should reduce the size
-                  # of the text to store on disk. 
-                  continue
-                of.write("{}{}[[{}]]\n".format(stripped, sep, title))
-            elem.clear()
+    op, sc = gzoutput(output[0])
+    for infn in input:
+      with bz2.open(infn, mode="rt") as inf:
+        # Need to use the iterative mode of etree
+        # The XML is so big it will exhaust all available
+        # memory unless your PC is huge
+        titleskip = False
+        for event, elem in xml.etree.ElementTree.iterparse(inf):
+          limit -= 1
+          if limit <= 0 and global_limit != 0:
+            return
+          # Grab the text out of the title, and add it in a wikipedia link
+          # for "context" of the sentence
+          if elem.tag.endswith("}title"):
+            titleskip = False
+            title = elem.text
+            titlecount += 1
+            if titlecount % 10000 == 0:
+              print("{} titles complete".format(titlecount))
+            # Skip articles which contain rote phrases
+            if title.startswith("Wikipedia:アップロードログ"):
+              titleskip = True
+          if not titleskip and elem.tag.endswith("}text") and elem.text is not None:
+            lines = elem.text.split("\n")
+            for line in lines:
+              # We need to ensure that the original text does not contain
+              # any of the separator we plan to use for our text files
+              notabs = line.replace(sep, " ")
+              stripped = notabs.strip()
+              if len(stripped) < 5:
+                # No way a valid sentence is < 5 chars
+                continue
+              if not sanitycheck.search(stripped):
+                # Analysis of the output text seemed to show a lot
+                # which were failing the sanity check. The check
+                # is simple and hopefully this should reduce the size
+                # of the text to store on disk. 
+                continue
+              sc.send([stripped, title, 0])
+          elem.clear()
+    sc.close()
+    op.join()
 
 rule tatoeba_idreplace:
   # tatoeba-to is <text> \t <space separated list of ids>
