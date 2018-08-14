@@ -25,7 +25,9 @@ def gzinput_read(send_conn, fl, limit):
       for line in inf:
         sentcount += 1
         if limit != 0 and sentcount > limit:
-          break
+          send_conn.send(None)
+          send_conn.close()
+          return
         sline = line.rstrip()
         split = sline.split(sep)
         text = split[0]
@@ -38,14 +40,41 @@ def gzinput_read(send_conn, fl, limit):
         else:
           score = 0
         send_conn.send([text, note, score])
+  send_conn.send(None)
   send_conn.close()
 
-def gzinput(fl, limit):
-  send_conn, recv_conn = multiprocessing.Pipe()
-  p = multiprocessing.Process(target=gzinput_read, args=(send_conn, fl, limit))
-  p.start()
-  print("Input Process id: {}".format(p.pid))
-  return p, recv_conn
+class Input:
+  def __init__(self, fl, limit):
+    recv_conn, send_conn = multiprocessing.Pipe(duplex=False)
+    self.p = multiprocessing.Process(target=gzinput_read, args=(send_conn, fl, limit))
+    self.p.start()
+    print("Input Process id: {}".format(self.p.pid))
+    send_conn.close()
+    self.rc = recv_conn
+    self.count = 0
+
+  def next(self):
+    self.count += 1
+    if self.count % 100000 == 0:
+      print("{} lines processed".format(self.count))
+    try:
+      read = self.rc.recv()
+    except EOFError:
+      read = None
+    if read is None:
+      self.text = None
+      self.note = None
+      self.score = None
+      return False
+    else:
+      self.text = read[0]
+      self.note = read[1]
+      self.score = read[2]
+      return True
+ 
+  def close(self):
+    self.rc.close()
+    self.p.join()
 
 def gzoutput_write(recv_conn, fn):
   with gzip.open(fn, mode="wt") as of:
@@ -53,26 +82,60 @@ def gzoutput_write(recv_conn, fn):
       try:
         read = recv_conn.recv()
       except EOFError:
+        print("gzoutput_write got EOF")
         break
-      of.write("{}{}{}{}{}".format(read[0], sep, read[1], sep, read[2]))
+      if read is None:
+        print("gzoutput_write got None")
+        break
+      of.write("{}{}{}{}{}\n".format(read[0], sep, read[1], sep, read[2]))
 
+  print("gzoutput_write closing connection")
   recv_conn.close()
+  print("gzoutput_write terminating")
 
-def gzoutput(fn):
-  send_conn, recv_conn = multiprocessing.Pipe()
-  p = multiprocessing.Process(target=gzoutput_write, args=(recv_conn, fn))
-  p.start()
-  print("Output Process id: {}".format(p.pid))
-  return p, send_conn
+class Output:
+  def __init__(self, fn):
+    recv_conn, send_conn = multiprocessing.Pipe(duplex=False)
+    self.p = multiprocessing.Process(target=gzoutput_write, args=(recv_conn, fn))
+    self.p.start()
+    self.sc = send_conn
+    print("Output Process id: {}".format(self.p.pid))
+    recv_conn.close()
+
+  def write(self, obj):
+    self.sc.send(obj)
+
+  def close(self):
+    self.sc.send(None)
+    self.sc.close()
+    self.p.join()
 
 rule all:
+  input:
+    "processed_data/filtered/stage2.txt.gz",
+    "processed_data/frequency_analysis/missing_char_analysis.txt"
+  output:
+    "data/sdb.txt.gz"
+  shell:
+    "cp {input[0]} {output}"
+    #; cat {input[1]} > /dev/null"
+
+rule missing_char_analysis:
+  input:
+    "processed_data/frequency_analysis/missingchars.txt.gz"
+  output:
+    "processed_data/frequency_analysis/missing_char_analysis.txt"
+  shell:
+    "zcat {input} | cut -f 1 | sort | uniq -c | sort -n > {output}"
+
+rule score:
   # N.B. - needs to be replaced with an indexing / scoring function
   input:
     "processed_data/frequency_analysis/charfreq.pkl",
     "processed_data/filtered/stage1.txt.gz"
   output:
-    "data/sdb.txt.gz",
-    "processed_data/frequency_analysis/missingchars.txt"
+    "processed_data/filtered/stage2.txt.gz",
+    "processed_data/frequency_analysis/missingchars.txt.gz"
   log:
     "makelog/missingchars.log"
   run:
@@ -80,15 +143,13 @@ rule all:
     missingchars = dict()
     pfh = open(input[0], mode="rb")
     freq = pickle.load(pfh)
-    ip, rc = gzinput(input[1:], limit)
-    op, sc = gzoutput(output[0])
+    ih = Input(input[1:], limit)
+    oh = Output(output[0])
     lh = open(log[0], mode="wt")
-    while True:
-      try:
-        text, note, fc = rc.recv()
-      except EOFError:
-        break
-      for c in text:
+    mcfh = Output(output[1])
+    while ih.next():
+      fc = 0
+      for c in ih.text:
         try:
           #print(c, freq[c])
           if freq[c][1] is not None:
@@ -96,98 +157,112 @@ rule all:
         except KeyError:
           #print(c, "Not in freq file")
           if c not in missingchars:
-            missingchars[c] = [1, [[text, note]]]
+            missingchars[c] = 1
           else:
-            missingchars[c][0] += 1
-            missingchars[c][1].append([text, note])
+            missingchars[c] += 1
+            cname = unicodedata.name(c, "NONAME")
+            mcfh.write(["{} {}".format(c, cname), 
+              "{} ({})".format(ih.text, ih.note), missingchars[c]])
             if missingchars[c] == 5:
-              cname = unicodedata.name(c, "NONAME")
-              lh.write("Missing Char: {} ({}) hit limit of 5".format(c, cname))
+              lh.write("Missing Char: {} ({}) hit limit of 5\n".format(c, cname))
       
-        sc.send([text, note, fc])
+      oh.write([ih.text, ih.note, fc])
 
-    ip.join()
-    sc.close()
-    op.join()            
-    with open(output[1], mode="wt") as mcf:
-      for k, v in missingchars.items():
-        if v > 5:
-          mcf.write("Missing Char: {} ({}): {}\n".format(k, unicodedata.name(k, "NONAME"), v[0]))
-          for arr in v[1]:
-            mcf.write("{}{}{}\n".format(arr[0], sep, arr[1]))
+    ih.close()
+    oh.close()
+    mcfh.close()
 
 rule filter:
   input:
+    "processed_data/frequency_analysis/charfreq.pkl",
     "processed_data/output/wikipedia.txt.gz",
     "processed_data/output/tatoeba.txt.gz"
   output:
     "processed_data/filtered/stage1.txt.gz"
+  log:
+    "makelog/stage1_excluded_symbols.txt"
   run:
     limit = global_limit
     sentcount = 0
     # Mostly math stuff that I understand well enough to know would not make useful sentences
-    excludedsymbols = list()
-    excludedsymbols.append("∃")
-    excludedsymbols.append("√")
-    excludedsymbols.append("∋")
-    excludedsymbols.append("∈")
-    excludedsymbols.append("⊂")
-    excludedsymbols.append("≧")
-    excludedsymbols.append("⋊")
-    ip, rc = gzinput(input, limit)
-    op, sc = gzoutput(output[0])
+    excluded = set()
+    excluded.add("∃")
+    excluded.add("√")
+    excluded.add("∋")
+    excluded.add("∈")
+    excluded.add("⊂")
+    excluded.add("≧")
+    excluded.add("⋊")
+    excluded.add("≃")
+    excluded.add("∩")
+    # Known good from pickle file
+    included = set()
+    pfh = open(input[0], mode="rb")
+    freq = pickle.load(pfh)
+    for k in freq.keys():
+      included.add(k)
+    # Bad categories
+    badnames = list()
+    badnames.append("HANGUL ")
+    badnames.append("TAMIL" )
+    badnames.append("CYRILLIC ")
+    badnames.append("MONGOLIAN ")
+    badnames.append("THAI ")
+    badnames.append("GUJARATI ")
+    badnames.append("MYANMAR ")
+    badnames.append("KANNADA ")
+    badnames.append("ARMENIAN ")
+    badnames.append("LAO ")
+    badnames.append("TELUGU ")
+    # We check all frequency-sampled Japanese characters
+    # before we check bad names. If we hit a CJK character
+    # it's either extreemly rare in Japanese or not Japanese
+    # either way I'm culling it.
+    badnames.append("CJK UNIFIED IDEOGRAPH")
+    badnames.append("ETHIOPIC ")
+    badnames.append("GURMUKHI ")
+    badnames.append("KANGXI ")
+    badnames.append("RUNIC LETTER")
+    badnames.append("TIFINAGH ")
+    badnames.append("ARABIC LETTER")
+    badnames.append("ARABIC-INDIC DIGIT")
+    badnames.append("HEBREW LETTER")
+    # Most stuff doesn't seem to be able to 
+    # render these correctly anyway
+    badnames.append("NONAME")
+    badnames.append("KHMER ")
+    # Analysis shows they weren't used in useful sentences
+    badnames.append("BOX DRAWINGS ") 
+    badnames.append("DEVANAGARI ")
+    badnames.append("BOPOMOFO ")
+    ih = Input(input[1:], limit)
+    oh = Output(output[0])
     # Unicode data to exclude sentences containing languages I can't read
-    while True:
-      try:
-        text, note, score = rc.recv()
-      except EOFError:
-        break
+    while ih.next():
       skip = False
-      for c in text:
-        cname = unicodedata.name(c, "NONAME")
-        if cname.startswith("HANGUL"):
+      for c in ih.text:
+        if c in included:
+          continue
+        if c in excluded:
           skip = True
           break
-        if cname.startswith("TAMIL"):
-          skip = True
-          break
-        if cname.startswith("CYRILLIC"):
-          skip = True
-          break
-        if cname.startswith("MONGOLIAN"):
-          skip = True
-          break
-        if cname.startswith("THAI"):
-          skip = True
-          break
-        if cname.startswith("GUJARATI"):
-          skip = True
-          break
-        if cname.startswith("MYANMAR"):
-          skip = True
-          break
-        if cname.startswith("KANNADA"):
-          skip = True
-          break
-        if cname.startswith("ARMENIAN"):
-          skip = True
-          break
-        if cname.startswith("LAO "):
-          skip = True
-          break
-        if cname.startswith("TELUGU"):
-          skip = True
-          break
-        if c in excludedsymbols:
-          skip = True
-          break
-            
-        if not skip:
-          sc.send([text, note, score])
 
-      ip.join()
-      sc.close()
-      op.join()            
+        cname = unicodedata.name(c, "NONAME")
+        for name in badnames:
+          if cname.startswith(name):
+            excluded.add(c)
+            skip = True
+            break
+        if skip:
+          break 
+      if not skip:
+        oh.write([ih.text, ih.note, ih.score])
+
+    ih.close()
+    oh.close()
+    lh = open(log[0], mode="wt")
+    lh.write("{}".format(excluded))
+    lh.close()
 
 rule wikipedia_finish:
   # N.b. Dodgy hack till I figure out the required steps
@@ -200,18 +275,17 @@ rule wikipedia_finish:
 
 rule wikipedia_nomarkup:
   input:
-    "processed_data/wikipedia_noxml/wikipedia.txt.gz"
+    "processed_data/wikipedia/nohtags.txt.gz"
   output:
-    "processed_data/wikipedia_nomarkup/wikipedia.txt.gz"
+    "processed_data/wikipedia/nomarkup.txt.gz"
   run:
     limit = global_limit
-    sentcount = 0
     # Sentence split regex
     # Full-width full stop
     # || Wikipedia markup table column separators
     # full stop + space, because full stop alone causes
     # false positives when dealing with URLs
-    sentsplit = re.compile('([。]|\|\||\. )')
+    sentsplit = re.compile('([。｡]|\|\||\. |<br ?/?>|%lf%)')
     # All full sentences (not phrases / clauses)
     # should contain one of the major particles
     sanitycheck = re.compile('[をがは]')
@@ -220,21 +294,19 @@ rule wikipedia_nomarkup:
     # Wiki-markup bold/italics
     boldital = re.compile("'{2,5}([^']*)'{2,5}")
     # Random tags that seem to show up in some articles
-    tags = re.compile("</?(em|li)>")
+    tags = re.compile("</?(nowiki|em|li)>")
     # Wiki-markup [[Page]] links
     simplelinks = re.compile("\[\[([^\[\]\|]*)\]\]")
     # Wiki-markup [[Page|Displayed Text]] links
     complexlinks = re.compile(r'\[\[[^\[\]\|]+\|([^\[\]\|]+)\]\]')
     # IPA phonetics
     phonetic = re.compile(r'{{IPA', flags=re.IGNORECASE)
-    # Correct / non-broken ref tag pairs
-    ref = re.compile(r'<ref[^<]*</ref>')
-    # Self-closing ref tag
-    refshort = re.compile(r'<ref[^/]*/>')
+    # Math
+    math = re.compile(r'<math>', flags=re.IGNORECASE)
     # ref tag with no end
-    refend = re.compile(r'<ref(>| name| group)[^<]*$')
+    #refend = re.compile(r'<ref(>| name| group)[^<]*$', flags=re.IGNORECASE)
     # ref tag with no start
-    reflonelyclose = re.compile(r'</ref>')
+    #reflonelyclose = re.compile(r'</ref>', flags=re.IGNORECASE)
     # Temporary links to another language
     tlink = re.compile(r'{{仮リンク\|([^\|]+)\|[^\|]*\|[^}]*}}')
     # Image link
@@ -243,6 +315,8 @@ rule wikipedia_nomarkup:
     nbsp = re.compile(r'&nbsp;')
     # html comments
     htmlc = re.compile(r'<!--.*?-->')
+    htmlcopen = re.compile(r'<!--')
+    htmlcclose = re.compile(r'-->')
     # citations
     cite = re.compile(r'{{Cite[^}]*}}', flags=re.IGNORECASE)
     # English language links
@@ -254,24 +328,21 @@ rule wikipedia_nomarkup:
     nell = re.compile(r'{{lang\|[a-zA-Z]+\|([^}]+)}}', flags=re.IGNORECASE)
     wnell = re.compile(r'{{LangWithName\|[a-zA-Z]+\|([^}]+)}}', flags=re.IGNORECASE)
     # Input/output pipes
-    ip, rc = gzinput(input, limit)
-    op, sc = gzoutput(output[0])
-    while True:
-      try:
-        text, note, score = rc.recv()
-      except EOFError:
-        break
-      # line should be <text block>\t<url>
-      parts = line.split(sep)
-      link = note
+    ih = Input(input, limit)
+    oh = Output(output[0])
+    while ih.next():
+      link = ih.note
       # Split based on the defined sentence separators
       # to turn <text block> into one or more sentences
-      strarr = sentsplit.split(text)
+      strarr = sentsplit.split(ih.text)
 
       for sent in strarr:
-        sentcount += 1
         # Strip out sentences with IPA - I can't read the damn things
         if phonetic.search(sent):
+          continue
+        # Strip sentences with <math> tags - even if I can understand
+        # them they make poor sample sentences
+        if math.search(sent):
           continue
         usent = sent
         # Replace en lang links
@@ -281,8 +352,13 @@ rule wikipedia_nomarkup:
         # Delete sentences still containing lang links since they're non-english
         if snell.search(usent) or nell.search(usent) or wnell.search(usent):
           continue
+        # Remove html comment openings with no close
+        # Note -  should go before list format stripping - this is
+        # sometimes used to comment out list items 
+        if htmlcopen.search(usent) and not htmlcclose.search(usent):
+          usent = htmlcopen.sub('', usent)
         # left-strip markers for lists, table formatting, indentation, etc
-        usent = usent.lstrip('#*:|-! ')
+        usent = usent.lstrip('#*:|-! •')
         usent = headre.sub(r'\1', usent)
         usent = boldital.sub(r'\1', usent)
         usent = tags.sub("", usent)
@@ -291,33 +367,75 @@ rule wikipedia_nomarkup:
         usent = tlink.sub(r'\1', usent)
         usent = ilink.sub('', usent)
         usent = nbsp.sub(' ', usent)
-        usent = htmlc.sub('', usent)
         usent = cite.sub('', usent)
-        usent = ref.sub('', usent)
-        usent = refshort.sub('', usent)
-        usent = refend.sub('', usent)
-        usent = reflonelyclose.sub('', usent)
-
+        #usent = refend.sub('', usent)
+        #usent = reflonelyclose.sub('', usent)
         # re-check length, it may be shorter now after regex changes
         if len(usent) > 5 and sanitycheck.search(usent):
-          sc.send([usent, link, score])
-          if sentcount % 100000 == 0:
-                print("{} sentences processed".format(sentcount))
-    sc.close()
-    ip.join()
-    op.join()
+          oh.write([usent, link, ih.score])
+    oh.close()
+    ih.close()
+
+rule wikipedia_notags:
+  input:
+    "processed_data/wikipedia/noxml.txt.gz"
+  output:
+    "processed_data/wikipedia/nohtags.txt.gz"
+  run:
+    limit = global_limit
+    # All full sentences (not phrases / clauses)
+    # should contain one of the major particles
+    sanitycheck = re.compile('[をがは]')
+    # All the regexes
+    div = re.compile(r'<div[^>]*>([^<]*)</div>', flags=re.IGNORECASE)
+    span = re.compile(r'<span[^>]*>([^<]*)</span>', flags=re.IGNORECASE)
+    #lostspan = re.compile(r'(<span[^>]*>|</span>)', flags=re.IGNORECASE)
+    font = re.compile(r'<font[^>]*>([^<]*)</font>', flags=re.IGNORECASE)
+    code = re.compile(r'<code[^>]*>([^<]*)</code>', flags=re.IGNORECASE)
+    tt = re.compile(r'<tt[^>]*>([^<]*)</tt>', flags=re.IGNORECASE)
+    strong = re.compile(r'<strong[^>]*>([^<]*)</strong>', flags=re.IGNORECASE)
+    small = re.compile(r'<small[^>]*>([^<]*)</small>', flags=re.IGNORECASE)
+    big = re.compile(r'<big[^>]*>([^<]*)</big>', flags=re.IGNORECASE)
+    # Correct / non-broken ref tag pairs
+    ref = re.compile(r'<ref[^<]*</ref>', flags=re.IGNORECASE)
+    # Self-closing ref tag
+    refshort = re.compile(r'<ref[^/]*/>', flags=re.IGNORECASE)
+    # HTML comments
+    htmlc = re.compile(r'<!--.*?-->')
+    ih = Input(input, limit)
+    oh = Output(output[0])
+    while ih.next():
+      usent = ih.text
+      prev = ''
+      while prev != usent:
+        prev = usent
+        usent = div.sub(r'\1', usent)
+        usent = span.sub(r'\1', usent)
+        #usent = lostspan.sub('', usent)
+        usent = font.sub(r'\1', usent)
+        usent = code.sub(r'\1', usent)
+        usent = tt.sub(r'\1', usent)
+        usent = strong.sub(r'\1', usent)
+        usent = small.sub(r'\1', usent)
+        usent = big.sub(r'\1', usent)
+        usent = ref.sub('', usent)
+        usent = refshort.sub('', usent)
+        usent = htmlc.sub('', usent)
+
+      if len(usent) > 5 and sanitycheck.search(usent):
+        oh.write([usent, ih.note, ih.score])
 
 rule wikipedia_noxml:
   input:
     ls("raw_data/wikipedia/", "bz2")
   output:
-    "processed_data/wikipedia_noxml/wikipedia.txt.gz"
+    "processed_data/wikipedia/noxml.txt.gz"
   run:
     limit = global_limit
     title = ""
     titlecount = 0
     sanitycheck = re.compile('[をがは]')
-    op, sc = gzoutput(output[0])
+    oh = Output(output[0])
     for infn in input:
       with bz2.open(infn, mode="rt") as inf:
         # Need to use the iterative mode of etree
@@ -327,7 +445,7 @@ rule wikipedia_noxml:
         for event, elem in xml.etree.ElementTree.iterparse(inf):
           limit -= 1
           if limit <= 0 and global_limit != 0:
-            return
+            break
           # Grab the text out of the title, and add it in a wikipedia link
           # for "context" of the sentence
           if elem.tag.endswith("}title"):
@@ -340,25 +458,12 @@ rule wikipedia_noxml:
             if title.startswith("Wikipedia:アップロードログ"):
               titleskip = True
           if not titleskip and elem.tag.endswith("}text") and elem.text is not None:
-            lines = elem.text.split("\n")
-            for line in lines:
-              # We need to ensure that the original text does not contain
-              # any of the separator we plan to use for our text files
-              notabs = line.replace(sep, " ")
-              stripped = notabs.strip()
-              if len(stripped) < 5:
-                # No way a valid sentence is < 5 chars
-                continue
-              if not sanitycheck.search(stripped):
-                # Analysis of the output text seemed to show a lot
-                # which were failing the sanity check. The check
-                # is simple and hopefully this should reduce the size
-                # of the text to store on disk. 
-                continue
-              sc.send([stripped, title, 0])
+            article = elem.text.replace("\n", "%lf%")
+            article = article.replace(sep, " ")
+            oh.write([article, title, 0])
           elem.clear()
-    sc.close()
-    op.join()
+    print("wikipedia_noxml closing oh")
+    oh.close()
 
 rule tatoeba_idreplace:
   # tatoeba-to is <text> \t <space separated list of ids>
@@ -370,13 +475,13 @@ rule tatoeba_idreplace:
     "processed_data/output/tatoeba.txt.gz"
   run:
     limit = global_limit
-    with gz.open(output[0], mode="wt") as of:
+    with gzip.open(output[0], mode="wt") as of:
       with bz2.open(input[1], mode="rt") as senf:
         senhash = dict()
         interestingids = set()
         engidhash = dict()
         print("Generating input dictionary")
-        with gz.open(input[0], mode="rt") as inf:
+        with gzip.open(input[0], mode="rt") as inf:
           for line in inf:
             limit -= 1
             if limit <= 0 and global_limit != 0:
@@ -441,7 +546,7 @@ rule tatoeba_tolink:
           links[targetid] = []
           
       # For each link, add it to appropriate array of links
-      with gzip.open(input[1], mode="rt") as linkf:
+      with bz2.open(input[1], mode="rt") as linkf:
         for linkl in linkf:
           linksplit = linkl.split("\t")
           # links is <id> \t <other sentence id>
@@ -465,9 +570,9 @@ rule tatoeba_fromlink:
     "processed_data/tatoeba_link/tatoeba-from.txt.gz"
   run:
     limit = global_limit
-    with bz2.open(output[0], mode="wt") as of:
+    with gzip.open(output[0], mode="wt") as of:
       for infn in input:
-        with gzip.open(infn, mode="rt") as inf:
+        with bz2.open(infn, mode="rt") as inf:
           for line in inf:
             limit -= 1
             if limit <= 0 and global_limit != 0:
@@ -505,13 +610,13 @@ rule tatoeba_extract_links:
 
 rule frequency_pickle:
   input:
-    "raw_data/frequency_analysis/charfreq.txt"
+    "raw_data/frequency_analysis/charfreq.txt",
+    "raw_data/frequency_analysis/symbols.txt"
   output:
     "processed_data/frequency_analysis/charfreq.pkl"
   run:
     with open(output[0], mode="wb") as of:
       with open(input[0], mode="rt") as inf:
-        symbols = '：:；;()（） {}[]|/\\<>,、.。＆&"”\'’「」0123456789０１２３４５６７８９=-+*%$#@!＝ー＋＊％＄＃＠！⋆〒℃ ˝'
         freq = dict()
         count = 1
         line = inf.readline()
@@ -577,8 +682,11 @@ rule frequency_pickle:
             else:
               freq[alternatekey] = v
         
-        for c in symbols:
-          if c not in freq:
-            freq[c] = ["Symbol", None]
+        with open(input[1], mode="rt") as symf:
+          for line in symf:
+            c = line[0]
+            print("(symbol) {}".format(c))
+            if c not in freq:
+              freq[c] = ["Symbol", None]
 
         pickle.dump(freq, of)
