@@ -7,6 +7,7 @@ import unicodedata
 import jaconv
 import multiprocessing
 import gzip
+import html.parser
 
 def ls(dirpath, format):
   toret = []
@@ -195,6 +196,10 @@ rule filter:
     excluded.add("⋊")
     excluded.add("≃")
     excluded.add("∩")
+    excluded.add("⊃")
+    excluded.add("∪")
+    excluded.add("∧")
+    excluded.add("∀")
     # Known good from pickle file
     included = set()
     pfh = open(input[0], mode="rb")
@@ -231,6 +236,8 @@ rule filter:
     # render these correctly anyway
     badnames.append("NONAME")
     badnames.append("KHMER ")
+    badnames.append("TIBETAN ")
+    badnames.append("GEORGIAN ")
     # Analysis shows they weren't used in useful sentences
     badnames.append("BOX DRAWINGS ") 
     badnames.append("DEVANAGARI ")
@@ -267,17 +274,18 @@ rule filter:
 rule wikipedia_finish:
   # N.b. Dodgy hack till I figure out the required steps
   input:
-    "processed_data/wikipedia_nomarkup/wikipedia.txt.gz"
+    "processed_data/wikipedia/linesplit.txt.gz"
   output:
     "processed_data/output/wikipedia.txt.gz"
   shell:
     "cp {input} {output}"
 
-rule wikipedia_nomarkup:
+
+rule wikipedia_linesplit:
   input:
-    "processed_data/wikipedia/nohtags.txt.gz"
+    "processed_data/wikipedia/stripchars.txt.gz"
   output:
-    "processed_data/wikipedia/nomarkup.txt.gz"
+    "processed_data/wikipedia/linesplit.txt.gz"
   run:
     limit = global_limit
     # Sentence split regex
@@ -285,49 +293,12 @@ rule wikipedia_nomarkup:
     # || Wikipedia markup table column separators
     # full stop + space, because full stop alone causes
     # false positives when dealing with URLs
-    sentsplit = re.compile('([。｡]|\|\||\. |<br ?/?>|%lf%)')
+    sentsplit = re.compile('([。｡]|\|\||\. |%lf%)')
+    headre = re.compile('^={1,6}([^=]*)={1,6}$')
+    exclude = re.compile('%exclude%')
     # All full sentences (not phrases / clauses)
     # should contain one of the major particles
     sanitycheck = re.compile('[をがは]')
-    # Wiki-markup headings
-    headre = re.compile('^={1,6}([^=]*)={1,6}$')
-    # Wiki-markup bold/italics
-    boldital = re.compile("'{2,5}([^']*)'{2,5}")
-    # Random tags that seem to show up in some articles
-    tags = re.compile("</?(nowiki|em|li)>")
-    # Wiki-markup [[Page]] links
-    simplelinks = re.compile("\[\[([^\[\]\|]*)\]\]")
-    # Wiki-markup [[Page|Displayed Text]] links
-    complexlinks = re.compile(r'\[\[[^\[\]\|]+\|([^\[\]\|]+)\]\]')
-    # IPA phonetics
-    phonetic = re.compile(r'{{IPA', flags=re.IGNORECASE)
-    # Math
-    math = re.compile(r'<math>', flags=re.IGNORECASE)
-    # ref tag with no end
-    #refend = re.compile(r'<ref(>| name| group)[^<]*$', flags=re.IGNORECASE)
-    # ref tag with no start
-    #reflonelyclose = re.compile(r'</ref>', flags=re.IGNORECASE)
-    # Temporary links to another language
-    tlink = re.compile(r'{{仮リンク\|([^\|]+)\|[^\|]*\|[^}]*}}')
-    # Image link
-    ilink = re.compile(r'\[\[(ファイル|File):[^\]]*\]\]')
-    # nbsp
-    nbsp = re.compile(r'&nbsp;')
-    # html comments
-    htmlc = re.compile(r'<!--.*?-->')
-    htmlcopen = re.compile(r'<!--')
-    htmlcclose = re.compile(r'-->')
-    # citations
-    cite = re.compile(r'{{Cite[^}]*}}', flags=re.IGNORECASE)
-    # English language links
-    ell = re.compile(r'{{lang\|en\|([^}]+)}}', flags=re.IGNORECASE)
-    sell = re.compile(r'{{Lang-en\|([^}]+)}}', flags=re.IGNORECASE)
-    well = re.compile(r'{{LangWithName\|en\|([^}]+)}}', flags=re.IGNORECASE)
-    # Non-english language links
-    snell = re.compile(r'{{lang-[a-zA-Z]+\|', flags=re.IGNORECASE)
-    nell = re.compile(r'{{lang\|[a-zA-Z]+\|([^}]+)}}', flags=re.IGNORECASE)
-    wnell = re.compile(r'{{LangWithName\|[a-zA-Z]+\|([^}]+)}}', flags=re.IGNORECASE)
-    # Input/output pipes
     ih = Input(input, limit)
     oh = Output(output[0])
     while ih.next():
@@ -335,95 +306,376 @@ rule wikipedia_nomarkup:
       # Split based on the defined sentence separators
       # to turn <text block> into one or more sentences
       strarr = sentsplit.split(ih.text)
-
       for sent in strarr:
-        # Strip out sentences with IPA - I can't read the damn things
-        if phonetic.search(sent):
+        # Strip sentences with %exclude% tags - HTML parser has decided
+        # this sentence is not good
+        if exclude.search(sent):
           continue
-        # Strip sentences with <math> tags - even if I can understand
-        # them they make poor sample sentences
-        if math.search(sent):
-          continue
+
         usent = sent
-        # Replace en lang links
-        usent = ell.sub(r'\1', usent)
-        usent = sell.sub(r'\1', usent)
-        usent = well.sub(r'\1', usent)
-        # Delete sentences still containing lang links since they're non-english
-        if snell.search(usent) or nell.search(usent) or wnell.search(usent):
-          continue
-        # Remove html comment openings with no close
-        # Note -  should go before list format stripping - this is
-        # sometimes used to comment out list items 
-        if htmlcopen.search(usent) and not htmlcclose.search(usent):
-          usent = htmlcopen.sub('', usent)
+        usent = headre.sub(r'\1', usent)
         # left-strip markers for lists, table formatting, indentation, etc
         usent = usent.lstrip('#*:|-! •')
-        usent = headre.sub(r'\1', usent)
-        usent = boldital.sub(r'\1', usent)
-        usent = tags.sub("", usent)
-        usent = complexlinks.sub(r'\1', usent)
-        usent = simplelinks.sub(r'\1', usent)
-        usent = tlink.sub(r'\1', usent)
-        usent = ilink.sub('', usent)
-        usent = nbsp.sub(' ', usent)
-        usent = cite.sub('', usent)
-        #usent = refend.sub('', usent)
-        #usent = reflonelyclose.sub('', usent)
-        # re-check length, it may be shorter now after regex changes
+        usent = usent.strip()
         if len(usent) > 5 and sanitycheck.search(usent):
           oh.write([usent, link, ih.score])
     oh.close()
     ih.close()
+
+rule wikipedia_stripchars:
+  input:
+    "processed_data/wikipedia/nomarkup.txt.gz"
+  output:
+    "processed_data/wikipedia/stripchars.txt.gz"
+  run:
+    limit = global_limit
+    chars = re.compile(r'(\u200E|\u200B|\u202C|\u202A|\u202D|\u200F|\uFEFF|\u200D|\u200C|\u206C)')
+    spaces = re.compile(r'(\u00A0)')
+    ih = Input(input, limit)
+    oh = Output(output[0])
+    while ih.next():
+      text = chars.sub('',ih.text)
+      text = spaces.sub(' ',text)
+      oh.write([text, ih.note, ih.score])
+    oh.close()
+    ih.close()
+
+mlstart = re.compile(r'(.*?)({{|\[\[)(.*)')
+markupend = re.compile(r'(.*?)}}(.*)')
+linkend = re.compile(r'(.*?)\]\](.*)')
+def get_markup(instr):
+  startm = mlstart.match(instr)
+  if not startm:
+    return None
+  pre = startm.group(1)
+  mtype = startm.group(2)
+  rem = startm.group(3)
+
+  if mtype == "{{":
+    endm = markupend.match(rem)
+  else:
+    endm = linkend.match(rem)
+
+  if not endm:
+    # somehow found a markup tag with no end
+    return None
+  
+  markup = endm.group(1)
+  post = endm.group(2)
+
+  return [pre, mtype, markup, post]
+
+markuphandling = dict()
+markuphandling['ANCHOR'] = 'drop'
+markuphandling['CITATION'] = 'drop'
+markuphandling['IPA'] = 'exclude'
+markuphandling['INT:PROXYBLOCKREASON'] = 'drop'
+markuphandling['FLAGICON'] = 'drop'
+markuphandling['MATH'] = 'exclude'
+markuphandling['MVAR'] = 'exclude'
+markuphandling['REFLIST'] = 'exclude'
+markuphandling['SFN'] = 'exclude'
+markuphandling['仮リンク'] = 1
+markuphandling['ヘルプページヘッダ'] = 'drop'
+swmarkuphandling = dict()
+swmarkuphandling['CITE'] = 'drop'
+swmarkuphandling['DEFAULTSORT:'] = 'drop'
+swmarkuphandling['デフォルトソート:'] = 'drop'
+swmarkuphandling['FLAG'] = 'drop'
+swmarkuphandling['INFOBOX'] = 'drop'
+def handle_markup(mtype, markup, lh, link):
+  if mtype == '[[':
+    # link
+    lsplit = markup.split('|')
+    if len(lsplit) == 1:
+      toret = lsplit[0]
+      if toret.startswith('ファイル:'):
+        return ''
+      if toret.startswith('File:'):
+        return ''
+      return toret
+    else:
+      return lsplit[1]
+    lh.write([markup, link, 0])
+
+  if mtype == '{{':
+    msplit = markup.split('|')
+    tag = msplit[0].upper().rstrip()
+    try:
+      handling = markuphandling[tag]
+    except KeyError:
+      handling = 'special'
+      for k, v in swmarkuphandling.items():
+        if tag.startswith(k):
+          handling = v
+    
+    if handling == 'exclude':
+      return '%exclude%'
+    if handling == 'drop':
+      return ''
+    if type(handling) is int:
+      if handling < len(msplit):
+        return msplit[handling]
+      else:
+        print("Out of bounds lookup for {}".format(markup))
+
+
+    if len(msplit) == 2:
+      if tag.startswith('LANG-'):
+        if tag.endswith('-EN'):
+          return msplit[1]
+        else:
+          return ''
+    
+    if len(msplit) > 2:
+      langarg = msplit[1].upper()
+      text = msplit[2]
+      if tag == 'LANG' or tag == 'LANGWITHNAME':
+        if langarg == 'EN':
+          return text
+        else:
+          return '%exclude%'
+
+  lh.write([markup, link, 0])
+  return ''
+    
+
+rule wikipedia_nomarkup:
+  input:
+    "processed_data/wikipedia/nohtags.txt.gz"
+  output:
+    "processed_data/wikipedia/nomarkup.txt.gz"
+  log:
+    "makelog/markup.log.gz"
+  run:
+    limit = global_limit
+    # Wiki-markup headings
+    headre = re.compile('^={1,6}([^=]*)={1,6}$')
+    # Wiki-markup bold/italics
+    boldital = re.compile("'{2,5}([^']*)'{2,5}")
+    # Input/output pipes
+    ih = Input(input, limit)
+    oh = Output(output[0])
+    lh = Output(log[0])
+    while ih.next():
+      link = ih.note
+      utext = ih.text
+      utext = headre.sub(r'\1', utext)
+      utext = boldital.sub(r'\1', utext)
+      remtext = utext
+      ret = get_markup(remtext)
+      complete = ''
+      while ret is not None:
+        #pre, mtype, markup, post 
+        newinner = handle_markup(ret[1], ret[2], lh, link)
+        complete += ret[0]
+        complete += newinner
+        remtext = ret[3]
+        ret = get_markup(remtext)
+      complete += remtext
+
+      #print("nomarkup converted {} to {} for {}".format(ih.text, complete, link))
+      oh.write([complete, link, ih.score])
+
+    oh.close()
+    ih.close()
+
+taghandling = dict()
+taghandling["a"] = "innertext"
+taghandling["abbr"] = "innertext"
+taghandling["b"] = "innertext"
+taghandling["big"] = "innertext"
+taghandling["body"] = "innertext"
+taghandling["blockquote"] = "innernl"
+taghandling["br"] = "nl"
+taghandling["br\\"] = "nl"
+taghandling["br."] = "nl"
+taghandling["br-"] = "nl"
+taghandling["caption"] = "innertext"
+taghandling["categorytree"] = "squash"
+taghandling["ce"] = "exclude"
+taghandling["center"] = "innernl"
+taghandling["charinsert"] = "squash"
+taghandling["chem"] = "exclude"
+taghandling["cite"] = "innertext"
+taghandling["code"] = "innertext"
+taghandling["del"] = "squash"
+taghandling["div"] = "innernl"
+taghandling["dd"] = "innertext"
+taghandling["dl"] = "innertext"
+taghandling["dt"] = "innertext"
+taghandling["em"] = "innertext"
+taghandling["font"] = "innertext"
+taghandling["gallery"] = "squash"
+taghandling["hiero"] = "exclude"
+taghandling["hr"] = "nl"
+taghandling["html"] = "innertext"
+taghandling["http:"] = "innertext"
+taghandling["https:"] = "innertext"
+taghandling["h1"] = "innernl"
+taghandling["h2"] = "innernl"
+taghandling["h3"] = "innernl"
+taghandling["h4"] = "innernl"
+taghandling["h5"] = "innernl"
+taghandling["i"] = "innertext"
+taghandling["imagemap"] = "squash"
+taghandling["img"] = "innertext"
+taghandling["includeonly"] = "innertext"
+taghandling["ins"] = "innertext"
+taghandling["inputbox"] = "squash"
+taghandling["kbd"] = "innertext"
+taghandling["li"] = "innernl"
+taghandling["math"] = "exclude"
+taghandling["noinclude"] = "squash"
+taghandling["nowiki"] = "innertext"
+taghandling["ol"] = "innertext"
+taghandling["onlyinclude"] = "innertext"
+taghandling["p"] = "innernl"
+taghandling["philosophy"] = "notatag"
+taghandling["poem"] = "innernl"
+taghandling["pre"] = "innertext"
+taghandling["q"] = "innertext"
+taghandling["rb"] = "innertext"
+taghandling["ref"] = "squash"
+taghandling["references"] = "squash"
+taghandling["remix"] = "notatag"
+taghandling["rp"] = "squash"
+taghandling["rt"] = "squash"
+taghandling["ruby"] = "innertext"
+taghandling["s"] = "innertext"
+taghandling["section"] = "innertext"
+taghandling["score"] = "exclude"
+taghandling["script"] = "squash"
+taghandling["small"] = "innertext"
+taghandling["source"] = "squash"
+taghandling["span"] = "innernl"
+taghandling["strike"] = "innertext"
+taghandling["strong"] = "innertext"
+taghandling["sub"] = "exclude"
+taghandling["sup"] = "exclude"
+taghandling["syntaxhighlight"] = "squash"
+taghandling["table"] = "innertext"
+taghandling["td"] = "innernl"
+taghandling["th"] = "innernl"
+taghandling["timeline"] = "squash"
+taghandling["title"] = "squash"
+taghandling["tr"] = "innertext"
+taghandling["tt"] = "innertext"
+taghandling["u"] = "innertext"
+taghandling["ul"] = "innertext"
+taghandling["var"] = "innertext"
+
+class HTMLStripper(html.parser.HTMLParser):
+  def __init__(self, logger):
+    super().__init__()
+    self.text = ""
+    self.sdepth = 0
+    self.logger = logger
+    self.note = ""
+
+  def reset(self):
+    super().reset()
+    self.text = ""
+    self.sdepth = 0
+
+  def handle_starttag(self, tag, attrs):
+    try:
+      handling = taghandling[tag]
+    except KeyError:
+      if self.sdepth <= 0:
+        #print("Unknown start tag: {}".format(tag))
+        self.logger.write([tag, self.note, 0])
+      handling = "notatag"
+
+    if handling == "squash":
+      self.sdepth += 1
+      return
+
+    if handling == "exclude":
+      self.text += "%exclude%"
+      self.sdepth += 1
+      return
+
+    if handling in ["innertext", "innernl"] :
+      # ignored
+      return
+
+    if handling == "nl":
+      self.text += "%lf%"
+      return
+    
+    if handling == "notatag":
+      if self.sdepth <= 0:
+        self.text += "<{}>".format(tag)
+      return
+
+  def handle_endtag(self, tag):
+    try:
+      handling = taghandling[tag]
+    except KeyError:
+      if self.sdepth <= 0:
+        self.logger.write([tag, self.note, 0])
+      handling = "notatag"
+
+    if handling == "squash":
+      self.sdepth -= 1
+      return
+    
+    if handling == "exclude":
+      self.sdepth -= 1
+      return
+
+    if handling == "innertext":
+      # ignored
+      return
+    
+    if handling == "innernl":
+      self.text += " %lf% "
+      return
+
+    if handling == "nl":
+      # ignored
+      return
+    
+    if handling == "notatag":
+      if self.sdepth <= 0:
+        self.text += "</{}>".format(tag)
+      return
+
+  def handle_data(self, data):
+    if self.sdepth <= 0:
+      self.text += data
 
 rule wikipedia_notags:
   input:
     "processed_data/wikipedia/noxml.txt.gz"
   output:
     "processed_data/wikipedia/nohtags.txt.gz"
+  log:
+    "makelog/tags.log.gz"
   run:
     limit = global_limit
     # All full sentences (not phrases / clauses)
     # should contain one of the major particles
     sanitycheck = re.compile('[をがは]')
-    # All the regexes
-    div = re.compile(r'<div[^>]*>([^<]*)</div>', flags=re.IGNORECASE)
-    span = re.compile(r'<span[^>]*>([^<]*)</span>', flags=re.IGNORECASE)
-    #lostspan = re.compile(r'(<span[^>]*>|</span>)', flags=re.IGNORECASE)
-    font = re.compile(r'<font[^>]*>([^<]*)</font>', flags=re.IGNORECASE)
-    code = re.compile(r'<code[^>]*>([^<]*)</code>', flags=re.IGNORECASE)
-    tt = re.compile(r'<tt[^>]*>([^<]*)</tt>', flags=re.IGNORECASE)
-    strong = re.compile(r'<strong[^>]*>([^<]*)</strong>', flags=re.IGNORECASE)
-    small = re.compile(r'<small[^>]*>([^<]*)</small>', flags=re.IGNORECASE)
-    big = re.compile(r'<big[^>]*>([^<]*)</big>', flags=re.IGNORECASE)
-    # Correct / non-broken ref tag pairs
-    ref = re.compile(r'<ref[^<]*</ref>', flags=re.IGNORECASE)
-    # Self-closing ref tag
-    refshort = re.compile(r'<ref[^/]*/>', flags=re.IGNORECASE)
-    # HTML comments
-    htmlc = re.compile(r'<!--.*?-->')
     ih = Input(input, limit)
     oh = Output(output[0])
+    lh = Output(log[0])
+    hs = HTMLStripper(lh)
     while ih.next():
-      usent = ih.text
-      prev = ''
-      while prev != usent:
-        prev = usent
-        usent = div.sub(r'\1', usent)
-        usent = span.sub(r'\1', usent)
-        #usent = lostspan.sub('', usent)
-        usent = font.sub(r'\1', usent)
-        usent = code.sub(r'\1', usent)
-        usent = tt.sub(r'\1', usent)
-        usent = strong.sub(r'\1', usent)
-        usent = small.sub(r'\1', usent)
-        usent = big.sub(r'\1', usent)
-        usent = ref.sub('', usent)
-        usent = refshort.sub('', usent)
-        usent = htmlc.sub('', usent)
+      hs.note = ih.note
+      hs.feed(ih.text)
+      hs.close()
+      usent = hs.text
+      # the HTML parser base class interprets entities which could contain tab characters
+      usent = usent.replace(sep, " ")
+      hs.reset()
 
       if len(usent) > 5 and sanitycheck.search(usent):
         oh.write([usent, ih.note, ih.score])
+    oh.close()
+    ih.close()
+    lh.close()
 
 rule wikipedia_noxml:
   input:
@@ -457,8 +709,16 @@ rule wikipedia_noxml:
             # Skip articles which contain rote phrases
             if title.startswith("Wikipedia:アップロードログ"):
               titleskip = True
+            if title.startswith("Template:"):
+              titleskip = True
+            if title.startswith("Wikipedia:削除依頼"):
+              titleskip = True
+            if title.startswith("Template‐ノート:"):
+              titleskip = True
+            if title.endswith(".js"):
+              titleskip = True
           if not titleskip and elem.tag.endswith("}text") and elem.text is not None:
-            article = elem.text.replace("\n", "%lf%")
+            article = elem.text.replace("\n", " %lf% ")
             article = article.replace(sep, " ")
             oh.write([article, title, 0])
           elem.clear()
