@@ -444,7 +444,7 @@ def handle_markup(mtype, markup, lh, link):
       if handling < len(msplit):
         return msplit[handling]
       else:
-        print("Out of bounds lookup for {}".format(markup))
+        print("Out of bounds lookup for {} in {}".format(markup, link))
 
 
     if len(msplit) == 2:
@@ -505,6 +505,7 @@ rule wikipedia_nomarkup:
       oh.write([complete, link, ih.score])
 
     oh.close()
+    lh.close()
     ih.close()
 
 taghandling = dict()
@@ -739,6 +740,8 @@ rule wikipedia_noxml:
             if title.startswith("Template:"):
               titleskip = True
             if title.startswith("Wikipedia:削除依頼"):
+              titleskip = True
+            if title.startswith("Wikipedia:削除記録"):
               titleskip = True
             if title.startswith("Template‐ノート:"):
               titleskip = True
