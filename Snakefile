@@ -114,12 +114,35 @@ class Output:
 rule all:
   input:
     "processed_data/filtered/stage2.txt.gz",
-    "processed_data/frequency_analysis/missing_char_analysis.txt"
+    "processed_data/frequency_analysis/missing_char_analysis.txt",
+    directory("data/indexes")
   output:
     "data/sdb.txt.gz"
   shell:
     "cp {input[0]} {output}"
     #; cat {input[1]} > /dev/null"
+
+rule index:
+  input:
+    "processed_data/frequency_analysis/charfreq.pkl",
+    "processed_data/filtered/stage2.txt.gz"
+  output:
+    directory("data/indexes")
+  run:
+    limit = global_limit
+    pfh = open(input[0], mode="rb")
+    freq = pickle.load(pfh)
+    ih = Input(input[1:], limit)
+    while ih.next():
+      for c in ih.text:
+        try:
+          #print(c, freq[c])
+          if freq[c][0] == "Kanji":
+            with open("{}/{}.txt".format(output[0], c), mode="at") as of:
+              of.write("{}{}{}{}{}\n".format(ih.text, sep, ih.note, sep, ih.score))
+        except KeyError:
+          #print(c, "Not in freq file")
+          pass
 
 rule missing_char_analysis:
   input:
@@ -150,11 +173,13 @@ rule score:
     mcfh = Output(output[1])
     while ih.next():
       fc = 0
+      count = 0
       for c in ih.text:
         try:
           #print(c, freq[c])
           if freq[c][1] is not None:
             fc += freq[c][1]
+            count += 1
         except KeyError:
           #print(c, "Not in freq file")
           if c not in missingchars:
@@ -167,7 +192,9 @@ rule score:
             if missingchars[c] == 5:
               lh.write("Missing Char: {} ({}) hit limit of 5\n".format(c, cname))
       
-      oh.write([ih.text, ih.note, fc])
+      if count > 0:
+        # implicitly strip sentences with 0 non-symbol characters
+        oh.write([ih.text, ih.note, (fc/count)])
 
     ih.close()
     oh.close()
