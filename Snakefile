@@ -8,6 +8,9 @@ import jaconv
 import multiprocessing
 import gzip
 import html.parser
+import math
+import operator
+import shutil
 
 def ls(dirpath, format):
   toret = []
@@ -113,36 +116,66 @@ class Output:
 
 rule all:
   input:
-    "processed_data/filtered/stage2.txt.gz",
+    "data/sdb.txt",
     "processed_data/frequency_analysis/missing_char_analysis.txt",
-    directory("data/indexes")
+    "data/index.pkl"
+    #directory("data/indexes")
   output:
-    "data/sdb.txt.gz"
+    "data/complete.txt"
   shell:
-    "cp {input[0]} {output}"
+    'echo "Generated on `date`" > {output[0]}'
+    #"cp {input[0]} {output}"
     #; cat {input[1]} > /dev/null"
+
+rule final:
+  input:
+    "processed_data/filtered/stage3.txt.gz"
+  output:
+    "data/sdb.txt"
+  shell:
+    "zcat {input[0]} > {output[0]}"
 
 rule index:
   input:
     "processed_data/frequency_analysis/charfreq.pkl",
-    "processed_data/filtered/stage2.txt.gz"
+    "data/sdb.txt"
   output:
-    directory("data/indexes")
+    "data/index.pkl"
   run:
     limit = global_limit
+    #maxentries = 1000
     pfh = open(input[0], mode="rb")
     freq = pickle.load(pfh)
-    ih = Input(input[1:], limit)
-    while ih.next():
-      for c in ih.text:
+    ih = open(input[1], "r")
+    ind = dict()
+    for c in freq.keys():
+      if freq[c][0] == "Kanji":
+        ind[c] = []
+    ptr = 0
+    c = None
+    mode = 'text'
+    while True:
+      c = ih.read(1)
+      if len(c) == 0:
+        break
+      if c == sep:
+        mode = 'note'
+        continue
+      if c in '\r\n':
+        ptr = ih.tell()
+        mode = 'text'
+        continue
+      if mode == 'text':
         try:
-          #print(c, freq[c])
-          if freq[c][0] == "Kanji":
-            with open("{}/{}.txt".format(output[0], c), mode="at") as of:
-              of.write("{}{}{}{}{}\n".format(ih.text, sep, ih.note, sep, ih.score))
+          #if len(ind[c]) > maxentries:
+          #  continue
+          ind[c].append(ptr)
         except KeyError:
-          #print(c, "Not in freq file")
           pass
+    indf = open(output[0], 'wb')
+    pickle.dump(ind, indf)
+    #print(ind)
+    indf.close()
 
 rule missing_char_analysis:
   input:
@@ -151,6 +184,73 @@ rule missing_char_analysis:
     "processed_data/frequency_analysis/missing_char_analysis.txt"
   shell:
     "zcat {input} | cut -f 1 | sort | uniq -c | sort -n > {output}"
+
+rule sort:
+  # N.B. - needs to be replaced with an indexing / scoring function
+  input:
+    "processed_data/filtered/stage2.txt.gz"
+  output:
+    "processed_data/filtered/stage3.txt.gz",
+  run:
+    limit = global_limit
+    partsize = 100000
+    tdir = "processed_data/temp"
+    ocount = 0
+    try:
+      shutil.rmtree(tdir)
+    except FileNotFoundError:
+      pass
+    os.mkdir(tdir)
+    ih = Input([input[0]], limit)
+    oh = Output("{}/{}.txt.gz".format(tdir, ocount))
+    part = []
+    while ih.next():
+      part.append([ih.text, ih.note, ih.score])
+
+      if len(part) >= partsize:
+        part.sort(key=operator.itemgetter(2))
+        for p in part:
+          oh.write(p)
+        oh.close()
+        ocount += 1
+        part = []
+        oh = Output("{}/{}.txt.gz".format(tdir, ocount))
+
+    part.sort(key=operator.itemgetter(2))
+    for p in part:
+      oh.write(p)
+    oh.close()
+    ih.close()
+
+    mihs = []
+    for i in range(0, ocount+1):
+      ih = Input(["{}/{}.txt.gz".format(tdir, i)], 0)
+      ih.next()
+      mihs.append(ih)
+
+    print("len(mihs)=", len(mihs))
+    moh = Output(output[0])
+    prevtext = None
+    dc = 0
+    while len(mihs) > 0:
+      ms = None
+      mi = None
+      for mihi in range(0, len(mihs)):
+        if ms is None or mihs[mihi].score < ms:
+          ms = mihs[mihi].score
+          mi = mihi
+      if mihs[mi].text != prevtext:
+        moh.write([mihs[mi].text, mihs[mi].note, mihs[mi].score])
+      else:
+        dc += 1
+      prevtext = mihs[mi].text
+      nr = mihs[mi].next()
+      if not nr:
+        mihs[mi].close()
+        del mihs[mi]
+        print("len(mihs)=", len(mihs))
+    moh.close()
+    print("dc = ", dc)
 
 rule score:
   # N.B. - needs to be replaced with an indexing / scoring function
@@ -194,7 +294,7 @@ rule score:
       
       if count > 0:
         # implicitly strip sentences with 0 non-symbol characters
-        oh.write([ih.text, ih.note, (fc/count)])
+        oh.write([ih.text, ih.note, (fc//count)])
 
     ih.close()
     oh.close()
@@ -204,7 +304,8 @@ rule filter:
   input:
     "processed_data/frequency_analysis/charfreq.pkl",
     "processed_data/output/wikipedia.txt.gz",
-    "processed_data/output/tatoeba.txt.gz"
+    "processed_data/output/tatoeba.txt.gz",
+    "processed_data/output/books.txt.gz"
   output:
     "processed_data/filtered/stage1.txt.gz"
   log:
@@ -271,10 +372,21 @@ rule filter:
     badnames.append("BOPOMOFO ")
     ih = Input(input[1:], limit)
     oh = Output(output[0])
+    # Set maximum valid sentence length - sentences that are too long are bad samples
+    # because they take too long to read and tend to be complex
+    maxlen = 50
     # Unicode data to exclude sentences containing languages I can't read
     while ih.next():
       skip = False
+      cvalid = 0
+      if len(ih.text) > maxlen:
+        continue
       for c in ih.text:
+        try:
+          if freq[c][0] is "Kanji" or freq[c][0].startswith("Kana"):
+            cvalid += 1
+        except KeyError:
+          pass
         if c in included:
           continue
         if c in excluded:
@@ -289,7 +401,7 @@ rule filter:
             break
         if skip:
           break 
-      if not skip:
+      if not skip and (cvalid*2) > len(ih.text):
         oh.write([ih.text, ih.note, ih.score])
 
     ih.close()
@@ -297,6 +409,30 @@ rule filter:
     lh = open(log[0], mode="wt")
     lh.write("{}".format(excluded))
     lh.close()
+
+rule books:
+  input:
+    ls("raw_data/books/", "txt")
+  output:
+    "processed_data/output/books.txt.gz"
+  run:
+    oh = Output(output[0])
+    sanitycheck = re.compile('[をがは]')
+    for inp in input:
+      with open(inp, "rt") as ih:
+        for inl in ih:
+          sl = []
+          if inl[0] == '「':
+            sl = [inl]
+          else:
+            sl = inl.split('。')
+          for s in sl:
+            usent = s.lstrip('#*:|-! •;；⇒')
+            usent = usent.strip()
+            if len(usent) > 5 and sanitycheck.search(usent):
+              oh.write([usent, inp, 0])
+    oh.close()
+        
 
 rule wikipedia_finish:
   # N.b. Dodgy hack till I figure out the required steps
@@ -342,7 +478,7 @@ rule wikipedia_linesplit:
         usent = sent
         usent = headre.sub(r'\1', usent)
         # left-strip markers for lists, table formatting, indentation, etc
-        usent = usent.lstrip('#*:|-! •')
+        usent = usent.lstrip('#*:|-! •;；⇒')
         usent = usent.strip()
         if len(usent) > 5 and sanitycheck.search(usent):
           oh.write([usent, link, ih.score])
@@ -705,6 +841,15 @@ rule wikipedia_notags:
     ih.close()
     lh.close()
 
+sw = list()
+sw.append("Wikipedia:索引")
+sw.append("Wikipedia:アップロードログ")
+sw.append("Template:")
+sw.append("Wikipedia:削除依頼")
+sw.append("Wikipedia:削除記録")
+sw.append("Wikipedia:投稿ブロック依頼")
+sw.append("Template‐ノート:")
+
 rule wikipedia_noxml:
   input:
     ls("raw_data/wikipedia/", "bz2")
@@ -735,16 +880,10 @@ rule wikipedia_noxml:
             if titlecount % 10000 == 0:
               print("{} titles complete".format(titlecount))
             # Skip articles which contain rote phrases
-            if title.startswith("Wikipedia:アップロードログ"):
-              titleskip = True
-            if title.startswith("Template:"):
-              titleskip = True
-            if title.startswith("Wikipedia:削除依頼"):
-              titleskip = True
-            if title.startswith("Wikipedia:削除記録"):
-              titleskip = True
-            if title.startswith("Template‐ノート:"):
-              titleskip = True
+            for swi in sw:
+              if title.startswith(swi):
+                titleskip = True
+                break
             if title.endswith(".js"):
               titleskip = True
           if not titleskip and elem.tag.endswith("}text") and elem.text is not None:
